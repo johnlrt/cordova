@@ -1,4 +1,4 @@
-import { decodeHealth, decodeModels, errorMessage, requestJSON, type Health, type Model } from '../api/client';
+import { ApiFailure, decodeHealth, decodeModels, requestJSON, type Health, type Model } from '../api/client';
 
 export interface Sample { time: number; latency: number; online: boolean }
 
@@ -9,7 +9,7 @@ export class Pilot {
   samples = $state<Sample[]>([]);
   models = $state<Model[]>([]);
   catalog = $state<'disconnected' | 'loading' | 'ready' | 'error'>('disconnected');
-  catalogError = $state('');
+  catalogError = $state<{ code: string; status: number } | null>(null);
   connected = $state(false);
   refreshing = $state(false);
   private key = '';
@@ -49,7 +49,7 @@ export class Pilot {
     const controller = this.modelController = new AbortController();
     const generation = ++this.generation;
     this.catalog = 'loading';
-    this.catalogError = '';
+    this.catalogError = null;
     try {
       const models = decodeModels(await requestJSON('/v1/models', controller.signal, this.key));
       if (controller.signal.aborted || generation !== this.generation) return;
@@ -62,7 +62,7 @@ export class Pilot {
       this.connected = false;
       this.key = '';
       this.catalog = 'error';
-      this.catalogError = errorMessage(error);
+      this.catalogError = error instanceof ApiFailure ? { code: error.code, status: error.status } : { code: 'unavailable', status: 0 };
     }
   }
 
@@ -73,7 +73,7 @@ export class Pilot {
     this.connected = false;
     this.models = [];
     this.catalog = 'disconnected';
-    this.catalogError = '';
+    this.catalogError = null;
   }
 
   dispose() { this.healthController?.abort(); this.disconnect(); }

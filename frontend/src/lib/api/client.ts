@@ -1,3 +1,5 @@
+import { messages, type Language } from '../i18n';
+
 export interface Health { status: 'ok'; stage: string; mode: 'mock' }
 export interface Model {
   id: string;
@@ -67,11 +69,17 @@ export async function requestJSON(path: '/healthz' | '/v1/models', signal: Abort
   return value;
 }
 
-export function errorMessage(error: unknown): string {
+export function apiErrorMessage(code: string, status: number, language: Language = 'en'): string {
+  const text = messages[language].errors;
+  if (status === 401) return text.unauthorized;
+  if (status === 429) return text.busy;
+  if (code === 'invalid_response') return text.invalid;
+  return text.unavailable;
+}
+
+export function errorMessage(error: unknown, language: Language = 'en'): string {
   if (error instanceof ApiFailure) {
-    if (error.status === 401) return 'Шлюз не принял ключ. Проверь его и подключись снова.';
-    if (error.status === 429) return 'Канал занят. Повтори запрос немного позже.';
-    if (error.code === 'invalid_response') return 'Ответ шлюза не соответствует API этого пилота.';
+    return apiErrorMessage(error.code, error.status, language);
   }
-  return 'Не удалось связаться со шлюзом. Проверь, что сервер запущен и адрес настроен правильно.';
+  return apiErrorMessage('', 0, language);
 }

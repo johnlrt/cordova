@@ -22,5 +22,5 @@ test('error copy does not render an arbitrary server exception or credential', (
   const sentinel = 'private API key sentinel';
   assert.ok(!errorMessage(new Error(sentinel)).includes(sentinel));
   assert.ok(!errorMessage(new ApiFailure(sentinel, 503)).includes(sentinel));
-  assert.match(errorMessage(new ApiFailure('unauthenticated', 401)), /ключ/);
+  assert.match(errorMessage(new ApiFailure('unauthenticated', 401)), /key/);
 });
