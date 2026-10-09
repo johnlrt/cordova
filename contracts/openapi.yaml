@@ -3,7 +3,7 @@
   "info": {
     "title": "Cordova public API",
     "version": "1.0.0",
-    "description": "Implemented M1 mock-node slice with metadata-only ledger status and balance reads. Chat usage remains synthetic and test credits only; no real model inference, deposits or payouts are active."
+    "description": "M1 mock request slice with durable M3 accounting. Optional node enrollment, authentication and basic C3 WebSocket sessions require node encryption and Ed25519 signing keys; model dispatch, signed catalog delivery, real inference, deposits and payouts remain unavailable."
   },
   "paths": {
     "/healthz": {
@@ -987,6 +987,385 @@
           }
         }
       }
+    },
+    "/api/node/auth/challenge": {
+      "post": {
+        "operationId": "createNodeAuthChallenge",
+        "summary": "Create a one-use node authentication challenge",
+        "description": "Public but rate limited. The returned nonce expires after 60 seconds and is consumed when a proof is submitted.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeAuthChallengeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One-use nonce.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeAuthChallenge"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "description": "Challenge creation is rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Node authentication storage is temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/node/auth/token": {
+      "post": {
+        "operationId": "issueNodeAccessToken",
+        "summary": "Exchange a node HMAC proof for a short-lived access token",
+        "description": "Consumes the nonce atomically. The returned Ed25519 JWT is valid for five minutes and is intended for one WebSocket upgrade.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeAuthTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Five-minute node access token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeAccessToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "description": "Token requests are rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Node authentication storage is temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/node/enrollments": {
+      "post": {
+        "operationId": "createNodeEnrollment",
+        "summary": "Start a node enrollment",
+        "description": "Available only when the gateway has node secret encryption and Ed25519 JWT signing keys configured. Returns a short-lived user code and a device code; the node secret is not issued until an authenticated owner approves the user code.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeEnrollmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Enrollment codes and owner verification URI.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeEnrollmentCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "429": {
+            "description": "Enrollment creation is rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Enrollment storage is temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/node/enrollments/approve": {
+      "post": {
+        "operationId": "approveNodeEnrollment",
+        "summary": "Approve a node for the current account",
+        "description": "Same-origin dashboard session required. Sends the owner approval and CSRF checks before binding the pending node to the account.",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 32
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeEnrollmentApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Node enrollment approved."
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Origin or CSRF validation failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Enrollment is no longer pending.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "User code expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Approval attempts are rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Enrollment storage is temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/node/enrollments/token": {
+      "post": {
+        "operationId": "pollNodeEnrollment",
+        "summary": "Poll for an approved node secret",
+        "description": "The device code must appear both as the JSON body value and as the bearer credential. A pending enrollment returns HTTP 428. Secret delivery expires ten minutes after owner approval.",
+        "security": [
+          {
+            "DeviceCodeAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeEnrollmentTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Node identity and approved enrollment secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeEnrollmentToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "410": {
+            "description": "The device code expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "The owner has not approved this enrollment yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Polling is rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Enrollment storage is temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/node/ws": {
+      "get": {
+        "operationId": "openNodeSocket",
+        "summary": "Open a signed-token node WebSocket session",
+        "description": "Available only when the optional node API keys are configured. The Ed25519 access token is consumed once at upgrade. This M2 server slice accepts hello, catalog.get, heartbeat, model.state and goodbye; it does not dispatch inference or provide a signed model catalog.",
+        "security": [
+          {
+            "NodeBearerAuth": []
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade. Send the C3 hello envelope as the first text frame."
+          },
+          "401": {
+            "description": "The access token is invalid, expired or already consumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Browser origins and query credentials are rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The optional node API is disabled."
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1000,6 +1379,16 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "__Host-cordova_session"
+      },
+      "DeviceCodeAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "One-time node enrollment device code"
+      },
+      "NodeBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Five-minute Ed25519 node access token"
       }
     },
     "parameters": {
@@ -2022,6 +2411,193 @@
             "type": "string",
             "minLength": 32,
             "maxLength": 128
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "NodeEnrollmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "hwid_hash",
+          "node_version",
+          "device_name"
+        ],
+        "properties": {
+          "hwid_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "node_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "device_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          }
+        }
+      },
+      "NodeEnrollmentCreated": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enrollment_id",
+          "user_code",
+          "device_code",
+          "verification_uri",
+          "expires_at",
+          "poll_interval_seconds"
+        ],
+        "properties": {
+          "enrollment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_code": {
+            "type": "string",
+            "pattern": "^[A-Z2-7]{5}-[A-Z2-7]{5}-[A-Z2-7]{3}$"
+          },
+          "device_code": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "verification_uri": {
+            "type": "string",
+            "format": "uri"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "poll_interval_seconds": {
+            "type": "integer",
+            "const": 5
+          }
+        }
+      },
+      "NodeEnrollmentTokenRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "device_code"
+        ],
+        "properties": {
+          "device_code": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "NodeEnrollmentToken": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_id",
+          "node_secret",
+          "server_origin"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_secret": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "server_origin": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "NodeEnrollmentApprovalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_code"
+        ],
+        "properties": {
+          "user_code": {
+            "type": "string",
+            "pattern": "^[A-Z2-7]{5}-[A-Z2-7]{5}-[A-Z2-7]{3}$"
+          }
+        }
+      },
+      "NodeAuthChallengeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_id"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "NodeAuthChallenge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "nonce",
+          "expires_at"
+        ],
+        "properties": {
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "NodeAuthTokenRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_id",
+          "nonce",
+          "proof"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "nonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "proof": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "NodeAccessToken": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "access_token",
+          "expires_at"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "minLength": 128,
+            "maxLength": 4096
           },
           "expires_at": {
             "type": "string",

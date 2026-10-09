@@ -248,5 +248,35 @@
     "file": "rest/live-ticket.json",
     "schema": "openapi.yaml#/components/schemas/LiveTicketResponse",
     "valid": true
+  },
+  {
+    "file": "rest/node-enrollment-request.json",
+    "schema": "openapi.yaml#/components/schemas/NodeEnrollmentRequest",
+    "valid": true
+  },
+  {
+    "file": "rest/node-enrollment-request-unknown.json",
+    "schema": "openapi.yaml#/components/schemas/NodeEnrollmentRequest",
+    "valid": false
+  },
+  {
+    "file": "rest/node-enrollment-created.json",
+    "schema": "openapi.yaml#/components/schemas/NodeEnrollmentCreated",
+    "valid": true
+  },
+  {
+    "file": "rest/node-enrollment-token.json",
+    "schema": "openapi.yaml#/components/schemas/NodeEnrollmentToken",
+    "valid": true
+  },
+  {
+    "file": "rest/node-auth-challenge.json",
+    "schema": "openapi.yaml#/components/schemas/NodeAuthChallenge",
+    "valid": true
+  },
+  {
+    "file": "rest/node-access-token.json",
+    "schema": "openapi.yaml#/components/schemas/NodeAccessToken",
+    "valid": true
   }
 ]

@@ -15,6 +15,7 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
     browserName: 'chromium',
     headless: true,
+    launchOptions: { args: ['--host-resolver-rules=MAP localhost 127.0.0.1'] },
     viewport: { width: 1280, height: 900 }
   }
 });

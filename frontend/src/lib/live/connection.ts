@@ -138,9 +138,9 @@ export class LiveConnection {
       this.lastPongAt = Date.now();
       this.attempt = 0;
       this.clearAuthTimer();
+      this.send('live.subscribe', { topics: ['nodes', 'usage', 'billing'], last_event_id: this.lastEventId });
       this.setStatus('connected');
       this.stopPolling();
-      this.send('live.subscribe', { topics: ['nodes', 'usage', 'billing'], last_event_id: this.lastEventId });
       this.startHeartbeat(run);
       return;
     }

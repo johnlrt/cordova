@@ -24,7 +24,7 @@
 | Проба | Результат этого снимка | Нужное доказательство |
 | --- | --- | --- |
 | Redis Lua: точность выше `2^53`, повтор операции и wrong key type | Прошла на временной Redis 8.10.2 с UUID-scoped ключами; подтвердились retry, settlement, cancellation, recovery и journal replay | Проверена одна незакреплённая версия; точное поведение около `int64` не проверялось. |
-| `WAITAOF` и connection-scoped fsync | Redis с AOF/`appendfsync always` вернул локальный fsync count `1` для `WAITAOF 1 0 1000`; financial integration suite прошла | Нет реплики и timeout/crash injection на каждой барьерной границе; production `WAITAOF 1 1` и закреплённый patch не проверены. |
+| `WAITAOF` и connection-scoped fsync | Redis с AOF/`appendfsync always` вернул локальный fsync count `1` для `WAITAOF 1 0 1000`; интеграционная fault-injection suite прошла после потери worker-ответа до/после барьера | Fault hooks не убивают Redis-процесс посреди записи; нет реплики, production `WAITAOF 1 1` и закреплённый patch не проверены. |
 | Kafka outbox повтор и consumer replay | Не запускалась: Kafka и Docker daemon недоступны | Реальные подтверждения broker и повторная доставка с теми же event IDs. |
 | Токенизация, шаблон, BOS и слот | Не запускалась: нет GGUF и закреплённой runner-сборки | Сопоставление реальных token IDs/выходного текста, неизвестный шаблон fail-closed, отмена и повторное использование слота после очистки. |
 | SOCKS5h удалённый DNS и fail-closed | Не запускалась: нет тестового proxy | Наблюдение DNS/соединений через прокси и подтверждение отсутствия прямого fallback. |
@@ -38,13 +38,13 @@
 
 | Проверка | Результат | Ограничение |
 | --- | --- | --- |
-| `go fmt ./...` | Прошла из `server/` | Выполнена установленным `go1.27.2`. |
-| `go test -count=1 ./...` | Все Go packages прошли, включая coordinator/API route errors и mock C6 tiered router | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`. |
-| `go test -race -count=1 ./...` | Все Go packages прошли под race detector, включая C6 selection filters, загрузку/прогрев моделей и fencing тесты | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; C3 live sessions не реализованы. |
-| `go vet ./...` | Прошла | Выполнена установленным `go1.27.2`. |
+| `go fmt ./...` | Прошла из `server/` | Выполнена установленным `go1.27.1 darwin/arm64`; проектный `go1.27.2` не установлен. |
+| `go test ./...` | Все Go packages прошли после последнего fault-injection изменения | Redis integration cases пропускаются без `CORDOVA_TEST_REDIS_URL`; они отдельно прошли на временном Redis. |
+| `go test -race -count=1 ./...` | Ранее прошли все Go packages; в этом снимке `make test-ledger-redis` повторно прошёл billing и M1 под `-race`, включая C3 enrollment, handshake, heartbeat, model state и session fencing на Redis | Полный race suite повторно не запускался после последнего C3 изменения; Redis integration cases в полном suite требуют `CORDOVA_TEST_REDIS_URL`. |
+| `go vet ./...` | Прошла | Выполнена установленным `go1.27.1 darwin/arm64`; проектный `go1.27.2` не установлен. |
 | `go build ./cmd/gateway ./cmd/mock-node` | Прошла | Компилирует Go gateway и mock-node; tiered router пока не подключён к gateway. |
-| `make test-ledger-recovery` | Race tests ledger/coordinator, API idempotency/cancel, M1 request path и mock C6 routing прошли | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; crash injection на каждой Redis write/barrier границе не выполнен. |
-| `make test-ledger-redis` | Прошла с Redis 8.10.2, AOF/`appendfsync always` и локальным Unix socket URL; billing и M1 integration tests прошли под `-race` | Временный binary не закреплён проектом; replica barrier и crash injection не запускались. |
+| `make test-ledger-recovery` | Race tests ledger/coordinator, API idempotency/cancel, M1 request path и mock C6 routing прошли ранее | Цель не запускает Redis integration cases. |
+| `make test-ledger-redis` | Прошла под `-race` с временным Redis 8.10.2, AOF/`appendfsync always` и изолированным Unix socket; billing и M1 suites прошли, включая новые fault-injection сценарии на atomic append/`WAITAOF` границах | Временный binary не закреплён проектом; Redis process-kill и replica barrier не запускались. |
 
 Воспроизводимый Go-вызов в текущей среде:
 
@@ -55,7 +55,9 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 
 ### Остальные проверки
 
-- `make contracts-check` прошёл после обновления M1/M3 idempotency/error contracts: 15 REST paths, 27 node WS types, 8 live WS types и 30 fixtures; Redis-backed handler integration не запускался.
+- `make contracts-check` прошёл после объединения изменений OpenAPI из `main` и C3 enrollment/auth/WS paths: 21 REST paths, 27 node WS types, 8 live WS types и 56 fixtures.
+- Redis integration на временном Redis 8.10.2 с AOF/`appendfsync always` проверила enrollment, owner approval session/CSRF, challenge/token exchange, однократность JWT, C3 hello/welcome/catalog/heartbeat/model-state и reconnect fencing. Это не проверка полного запуска Go gateway вместе с Rust node.
 - `cd node && RUSTUP_TOOLCHAIN=stable cargo fmt --all -- --check && RUSTUP_TOOLCHAIN=stable cargo test --workspace --offline` прошёл: 14 Rust tests. Использован установленный `stable`, а не зафиксированный проектом Rust 1.96.0.
 - `make test-ledger-redis` прошла на временной Redis-сборке; Kafka replay, tokenizer parity, SOCKS5h и wallet stagenet проверки не подтверждены.
+- `CORDOVA_TEST_REDIS_SERVER=/private/tmp/redis-8.10.2/src/redis-server make test-ledger-redis-process` прошла под `-race`: тест завершил собственный Redis после Lua append до `WAITAOF`, перезапустил его на том же AOF-каталоге, затем подтвердил orphan refund, нулевой reserved balance и journal replay. Это не проверяет убийство процесса посреди Redis-команды или replica fsync.
 - Docker daemon недоступен из-за отсутствующего `/Users/abbas/.docker/run/docker.sock`; изолированный стек не запускался.

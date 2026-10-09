@@ -21,6 +21,7 @@ import (
 type Handler struct {
 	store        *Store
 	cfg          Config
+	nodes        *nodeService
 	ledger       AccountingReader
 	authenticate api.Authenticator
 	requests     *api.RequestRegistry
@@ -72,6 +73,12 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 	}
 	mux := http.NewServeMux()
 	h := &Handler{store: store, cfg: cfg, ledger: ledger, authenticate: store.Authenticate, requests: requests}
+	if len(cfg.NodeSecretEncryptionKey) > 0 || len(cfg.NodeJWTSigningKey) > 0 {
+		h.nodes, err = newNodeService(store.redis, cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if len(readiness) > 0 {
 		h.ready = readiness[0]
 	}
@@ -95,6 +102,14 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 	mux.HandleFunc("/api/requests/{id}", h.requestStatus)
 	mux.HandleFunc("/api/live-ticket", h.liveTicket)
 	mux.HandleFunc("/api/live", h.live)
+	if h.nodes != nil {
+		mux.HandleFunc("/api/node/enrollments", h.createNodeEnrollment)
+		mux.HandleFunc("/api/node/enrollments/token", h.pollNodeEnrollment)
+		mux.HandleFunc("/api/node/enrollments/approve", h.approveNodeEnrollment)
+		mux.HandleFunc("/api/node/auth/challenge", h.nodeAuthChallenge)
+		mux.HandleFunc("/api/node/auth/token", h.nodeAuthToken)
+		mux.HandleFunc("/api/node/ws", h.nodeWebSocket)
+	}
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)

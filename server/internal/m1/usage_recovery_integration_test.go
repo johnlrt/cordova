@@ -10,6 +10,8 @@ import (
 	"cordova/server/internal/api"
 	"cordova/server/internal/billing"
 	"cordova/server/internal/domain"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type pendingUsageRecoverySource struct {
@@ -120,6 +122,35 @@ func TestRedisUsageRecoveryReplaysTerminalProjectionWithoutContent(t *testing.T)
 		defer cleanupCancel()
 		_ = client.XDel(cleanupCtx, "cv:v1:outbox:usage", streamID).Err()
 	})
+}
+
+func TestRedisLiveCursorReceivesEventsCreatedAfterHandshake(t *testing.T) {
+	client := idempotencyTestRedis(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	accountID := integrationID(t)
+	resourceID := integrationID(t)
+	stream := "cv:v1:live:" + accountID
+	t.Cleanup(func() { _ = client.Del(context.Background(), stream).Err() })
+	store, err := NewStore(client, Config{Origin: "https://example.test", PrivacyNoticeVersion: "v1", Pepper: []byte(strings.Repeat("p", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cursor, err := store.LiveEvents(ctx, accountID, "")
+	if err != nil || cursor != "0-0" {
+		t.Fatalf("initial live cursor=%q err=%v", cursor, err)
+	}
+	eventID, err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{
+		"topic": "usage", "resource_id": resourceID, "revision": "1", "action": "invalidate",
+	}}).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, next, err := store.LiveEvents(ctx, accountID, cursor)
+	if err != nil || len(events) != 1 || events[0].EventID != eventID || events[0].ResourceID != resourceID || next != eventID {
+		t.Fatalf("events after initial subscription cursor=%+v next=%q err=%v", events, next, err)
+	}
 }
 
 func integrationID(t *testing.T) string {

@@ -656,6 +656,13 @@ func posting(bucket, account string, delta int64) Posting {
 	return Posting{Bucket: bucket, AccountID: account, Delta: strconv.FormatInt(delta, 10)}
 }
 
+func negativeAmount(value domain.Piconero) string {
+	if value.Int64() == 0 {
+		return "0"
+	}
+	return "-" + value.String()
+}
+
 func hashEntry(entry Entry) (string, error) {
 	entry.EntryHash = ""
 	data, err := json.Marshal(entry)

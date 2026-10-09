@@ -114,12 +114,16 @@ test('live connection authenticates with a first-frame ticket, resyncs REST, and
   let resyncs = 0;
   let current = true;
   let secondConnection: LiveConnection | undefined;
+  let subscribeSentBeforeConnected = false;
   const account = {
     account: { id: accountId, username: 'cordova-user', created_at: '2026-10-09T10:00:00Z', totp_enabled: false, privacy_notice_version: 'privacy-v1' },
     csrf_token: 'synthetic-csrf-token-long-enough', expires_at: '2026-10-10T10:00:00Z'
   };
   const connection = new LiveConnection(account, 1, {
-    onStatus: (status) => statuses.push(status),
+    onStatus: (status) => {
+      statuses.push(status);
+      if (status === 'connected') subscribeSentBeforeConnected = JSON.parse(sent.at(-1) ?? '{}').type === 'live.subscribe';
+    },
     onInvalidate: (event) => invalidations.push(event.event_id),
     onResync: () => { resyncs++; },
     onPoll: () => {}
@@ -144,6 +148,7 @@ test('live connection authenticates with a first-frame ticket, resyncs REST, and
     socket?.emit(ready);
     assert.equal(JSON.parse(sent[1]).type, 'live.subscribe');
     assert.deepEqual(JSON.parse(sent[1]).payload.topics, ['nodes', 'usage', 'billing']);
+    assert.equal(subscribeSentBeforeConnected, true);
     const event = { event_id: 'stream-42', topic: 'usage', resource_id: resourceId, revision: 2, action: 'invalidate' };
     socket?.emit(frame('live.event', event, 2));
     await new Promise((resolve) => setTimeout(resolve, 275));

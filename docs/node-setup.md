@@ -39,7 +39,7 @@ The node accepts runtime settings through `run` flags or the `CORDOVA_NODE_*` en
 
 ## Current integration boundary
 
-The Go server in this checkout is still the Stage 1 mock API and does not implement enrollment, node authentication, catalog delivery, or `/api/node/ws`. The CLI therefore cannot enroll against the local Stage 1 server, and no end-to-end node session has been verified. A signed model catalog and its trusted public key must come from a server implementation before a model can be downloaded or run.
+The Go server has opt-in enrollment and HMAC challenge/JWT HTTP endpoints. They are enabled only when both `CORDOVA_NODE_SECRET_ENCRYPTION_KEY` and `CORDOVA_NODE_JWT_SIGNING_KEY` (or their `_FILE` variants) are set. The keys accept hex or base64; use a 32-byte AES key and a 32-byte Ed25519 seed or canonical 64-byte private key. `/api/node/ws` now accepts the C3 hello, empty catalog, heartbeat and goodbye flow with reconnect fencing. The owner approval UI, signed catalog, model commands, Redis slot leases, and inference dispatch are not implemented yet, so the CLI cannot serve requests through this gateway and no model can be admitted or run here.
 
 The node currently runs one inference slot. It accepts one-slot synthetic benchmark challenges; it reports zero verified capacity and zero peak VRAM rather than inferring those values from hardware. Multi-slot calibration, server-side enrollment/WebSocket handling, generated Rust bindings from `contracts/ws/v1.schema.json`, and cross-platform transport smoke tests remain open work. The current source keeps strict typed protocol DTOs in one crate.
 

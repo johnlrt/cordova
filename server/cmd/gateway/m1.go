@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -30,9 +32,13 @@ func runM1(address string) error {
 	}
 	notice := strings.TrimSpace(os.Getenv("CORDOVA_PRIVACY_NOTICE_VERSION"))
 	if notice == "" {
-		notice = "v1"
+		notice = m1.DefaultPrivacyNoticeVersion
 	}
 	pepper, err := secretBytes("CORDOVA_APP_PEPPER", "CORDOVA_APP_PEPPER_FILE")
+	if err != nil {
+		return err
+	}
+	nodeEncryptionKey, nodeSigningKey, err := nodeAPIKeys()
 	if err != nil {
 		return err
 	}
@@ -56,7 +62,9 @@ func runM1(address string) error {
 	}
 	rdb := redis.NewClient(parsedRedis)
 	defer rdb.Close()
-	config := m1.Config{Origin: origin, PrivacyNoticeVersion: notice, Pepper: pepper, SecureCookies: true, TrustProxy: strings.EqualFold(os.Getenv("CORDOVA_TRUST_PROXY"), "true")}
+	config := m1.Config{Origin: origin, PrivacyNoticeVersion: notice, Pepper: pepper,
+		NodeSecretEncryptionKey: nodeEncryptionKey, NodeJWTSigningKey: nodeSigningKey,
+		SecureCookies: true, TrustProxy: strings.EqualFold(os.Getenv("CORDOVA_TRUST_PROXY"), "true")}
 	store, err := m1.NewStore(rdb, config)
 	if err != nil {
 		return err
@@ -224,4 +232,62 @@ func secretBytes(envName, fileName string) ([]byte, error) {
 		return nil, errors.New(envName + " or " + fileName + " is required")
 	}
 	return []byte(value), nil
+}
+
+func nodeAPIKeys() ([]byte, ed25519.PrivateKey, error) {
+	encryptionText, encryptionSet, err := optionalSecretText("CORDOVA_NODE_SECRET_ENCRYPTION_KEY", "CORDOVA_NODE_SECRET_ENCRYPTION_KEY_FILE")
+	if err != nil {
+		return nil, nil, err
+	}
+	signingText, signingSet, err := optionalSecretText("CORDOVA_NODE_JWT_SIGNING_KEY", "CORDOVA_NODE_JWT_SIGNING_KEY_FILE")
+	if err != nil {
+		return nil, nil, err
+	}
+	if !encryptionSet && !signingSet {
+		return nil, nil, nil
+	}
+	if !encryptionSet || !signingSet {
+		return nil, nil, errors.New("both node encryption and JWT signing keys are required to enable the node API")
+	}
+	encryptionKey, err := decodeFixedKey(encryptionText, 32)
+	if err != nil {
+		return nil, nil, errors.New("node encryption key must encode exactly 32 bytes")
+	}
+	signingBytes, err := decodeFixedKey(signingText, ed25519.PrivateKeySize)
+	if err == nil {
+		return encryptionKey, ed25519.PrivateKey(signingBytes), nil
+	}
+	seed, err := decodeFixedKey(signingText, ed25519.SeedSize)
+	if err != nil {
+		return nil, nil, errors.New("node JWT signing key must encode an Ed25519 seed or private key")
+	}
+	return encryptionKey, ed25519.NewKeyFromSeed(seed), nil
+}
+
+func optionalSecretText(envName, fileName string) (string, bool, error) {
+	if file := strings.TrimSpace(os.Getenv(fileName)); file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", false, fmt.Errorf("read %s: %w", fileName, err)
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" {
+			return "", false, errors.New(fileName + " is empty")
+		}
+		return value, true, nil
+	}
+	value := strings.TrimSpace(os.Getenv(envName))
+	return value, value != "", nil
+}
+
+func decodeFixedKey(value string, size int) ([]byte, error) {
+	if decoded, err := hex.DecodeString(value); err == nil && len(decoded) == size {
+		return decoded, nil
+	}
+	for _, encoding := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding, base64.StdEncoding, base64.URLEncoding} {
+		if decoded, err := encoding.DecodeString(value); err == nil && len(decoded) == size {
+			return decoded, nil
+		}
+	}
+	return nil, errors.New("encoded key has the wrong size")
 }

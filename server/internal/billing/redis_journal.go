@@ -61,7 +61,15 @@ type RedisJournal struct {
 	capsKey         string
 	barrierKey      string
 	usagePendingKey string
+	faultInjector   func(redisJournalFaultStage, string) error
 }
+
+type redisJournalFaultStage string
+
+const (
+	redisFaultAfterAtomicAppend redisJournalFaultStage = "after_atomic_append"
+	redisFaultAfterAOFBarrier   redisJournalFaultStage = "after_aof_barrier"
+)
 
 func NewRedisJournal(client *redis.Client, requireReplica bool) (*RedisJournal, error) {
 	if client == nil {
@@ -240,12 +248,25 @@ func (j *RedisJournal) append(ctx context.Context, entry Entry, requestID string
 		default:
 			return Entry{}, j.markUncertain(ErrInvalidOperation)
 		}
+		if err := j.injectFault(redisFaultAfterAtomicAppend, entry.OperationID); err != nil {
+			return Entry{}, j.markUncertain(err)
+		}
 		if err := j.waitAOF(ctx, conn); err != nil {
+			return Entry{}, j.markUncertain(err)
+		}
+		if err := j.injectFault(redisFaultAfterAOFBarrier, entry.OperationID); err != nil {
 			return Entry{}, j.markUncertain(err)
 		}
 		return entry, nil
 	}
 	return Entry{}, ErrJournalConflict
+}
+
+func (j *RedisJournal) injectFault(stage redisJournalFaultStage, operationID string) error {
+	if j.faultInjector == nil {
+		return nil
+	}
+	return j.faultInjector(stage, operationID)
 }
 
 func (j *RedisJournal) waitAOF(ctx context.Context, conn *redis.Conn) error {
@@ -636,7 +657,7 @@ func (j *RedisJournal) Recover(ctx context.Context, at time.Time) (int, error) {
 					posting(BucketReserved, checkpoint.AccountID, amount.Int64()), posting(BucketAvailable, checkpoint.AccountID, -amount.Int64()),
 				}}
 			cap := CapAdjustment{Key: checkpoint.AccountID + ":" + checkpoint.APIKeyID + ":" + checkpoint.AcceptedDay,
-				Limit: checkpoint.DailySpendCap.String(), SpentDelta: "0", ReservedDelta: "-" + amount.String()}
+				Limit: checkpoint.DailySpendCap.String(), SpentDelta: "0", ReservedDelta: negativeAmount(amount)}
 			if _, err := j.appendRequest(ctx, entry, stored.id, stored.revision, checkpoint, cap, true); err != nil {
 				return recovered, err
 			}
@@ -1093,6 +1114,10 @@ local function validUnsigned(value)
     (#value==1 or string.sub(value,1,1)~='0') and #value<=19 and
     (#value<19 or value<='9000000000000000000')
 end
+local function negativeUnsigned(value)
+  if value=='0' then return '0' end
+  return '-'..value
+end
 local function validCounter(value)
   return type(value)=='string' and value~='' and string.match(value,'^%d+$')~=nil and
     (#value==1 or string.sub(value,1,1)~='0') and #value<=20 and
@@ -1268,15 +1293,15 @@ elseif hasRequest=='1' then
     end
     if spentDelta~='0' or reservedDelta~=amount then return redis.error_reply('CORDOVA_CAP_POSTING_MISMATCH') end
     expectPosting('user.available',requestObject.account_id,amount)
-    expectPosting('user.reserved',requestObject.account_id,'-'..amount)
+    expectPosting('user.reserved',requestObject.account_id,negativeUnsigned(amount))
   elseif requestObject.status=='accepted' or requestObject.status=='refunded' and entryKind=='attempt_refund' then
     if entryKind~='attempt_refund' or not oldRequest or oldRequest.status~='running' or activeCount~=0 or settledCount~=0 or cancelledCount~=0 or
        selected.reservation.status~='refunded' or selected.output_tokens~=0 or
        recordObject.operation_id~='refund:'..requestID..':'..recordObject.attempt_id then
       return redis.error_reply('CORDOVA_INVALID_REQUEST_TRANSITION')
     end
-    if spentDelta~='0' or reservedDelta~='-'..amount then return redis.error_reply('CORDOVA_CAP_POSTING_MISMATCH') end
-    expectPosting('user.available',requestObject.account_id,'-'..amount)
+    if spentDelta~='0' or reservedDelta~=negativeUnsigned(amount) then return redis.error_reply('CORDOVA_CAP_POSTING_MISMATCH') end
+    expectPosting('user.available',requestObject.account_id,negativeUnsigned(amount))
     expectPosting('user.reserved',requestObject.account_id,amount)
   elseif requestObject.status=='settled' or requestObject.status=='cancelled' then
     local isCancel=requestObject.status=='cancelled'
@@ -1290,22 +1315,22 @@ elseif hasRequest=='1' then
     local actual=addSigned(inputCost,outputCost)
     if isCancel and selected.output_tokens==0 then actual='0' end
     if not validUnsigned(actual) or cmpAbs(actual,amount)>0 then return redis.error_reply('CORDOVA_SETTLEMENT_AMOUNT_MISMATCH') end
-    local refund=addSigned(amount,'-'..actual)
+    local refund=addSigned(amount,negativeUnsigned(actual))
     local ownerProduct=mulSmall(actual,requestObject.price.owner_share_bps)
     local ownerCredit=divSmall(ownerProduct,10000)
-    local platformTake=addSigned(actual,'-'..ownerCredit)
+    local platformTake=addSigned(actual,negativeUnsigned(ownerCredit))
     local availablePosting=actualPostings['user.available:'..requestObject.account_id]
     local ownerPosting=actualPostings['owner.pending:'..selected.reservation.owner_id]
     local equityPosting=actualPostings['equity:']
-    if actualPostings['user.reserved:'..requestObject.account_id]~=amount or availablePosting~='-'..refund or
-       ownerPosting~='-'..ownerCredit or equityPosting~='-'..platformTake then
+    if actualPostings['user.reserved:'..requestObject.account_id]~=amount or availablePosting~=negativeUnsigned(refund) or
+       ownerPosting~=negativeUnsigned(ownerCredit) or equityPosting~=negativeUnsigned(platformTake) then
       return redis.error_reply('CORDOVA_SETTLEMENT_POSTING_MISMATCH')
     end
-    if not validUnsigned(actual) or spentDelta~=actual or reservedDelta~='-'..amount then return redis.error_reply('CORDOVA_CAP_POSTING_MISMATCH') end
+    if not validUnsigned(actual) or spentDelta~=actual or reservedDelta~=negativeUnsigned(amount) then return redis.error_reply('CORDOVA_CAP_POSTING_MISMATCH') end
     expectPosting('user.reserved',requestObject.account_id,amount)
-    expectPosting('user.available',requestObject.account_id,'-'..refund)
-    expectPosting('owner.pending',selected.reservation.owner_id,'-'..ownerCredit)
-    expectPosting('equity','', '-'..platformTake)
+    expectPosting('user.available',requestObject.account_id,negativeUnsigned(refund))
+    expectPosting('owner.pending',selected.reservation.owner_id,negativeUnsigned(ownerCredit))
+    expectPosting('equity','', negativeUnsigned(platformTake))
   elseif requestObject.status=='refunded' and entryKind=='request_abandoned' then
     if not oldRequest or oldRequest.status~='accepted' or activeCount~=0 or settledCount~=0 or cancelledCount~=0 or refundedCount~=attemptCount or
        recordObject.operation_id~='abandon:'..requestID or spentDelta~='0' or reservedDelta~='0' then
@@ -1339,7 +1364,7 @@ elseif hasRequest=='1' then
   nextSpent=addSigned(spent,spentDelta)
   nextReserved=addSigned(reserved,reservedDelta)
   if not validUnsigned(nextSpent) or not validUnsigned(nextReserved) or
-     cmpAbs(nextSpent,effectiveLimit)>0 or cmpAbs(nextReserved,addSigned(effectiveLimit,'-'..nextSpent))>0 then
+     cmpAbs(nextSpent,effectiveLimit)>0 or cmpAbs(nextReserved,addSigned(effectiveLimit,negativeUnsigned(nextSpent)))>0 then
     return {-4,'spend cap exceeded'}
   end
 else

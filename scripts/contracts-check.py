@@ -202,7 +202,8 @@ def main() -> int:
             "/healthz", "/v1/models", "/v1/chat/completions",
             "/api/auth/register", "/api/auth/login", "/api/auth/recover", "/api/auth/logout",
             "/api/session", "/api/keys", "/api/keys/{id}", "/api/usage", "/api/billing/balance", "/api/requests/{id}",
-            "/api/live-ticket", "/api/live",
+            "/api/live-ticket", "/api/live", "/api/node/enrollments", "/api/node/enrollments/token",
+            "/api/node/enrollments/approve", "/api/node/auth/challenge", "/api/node/auth/token", "/api/node/ws",
         }
         if set(openapi.get("paths", {})) != expected_paths:
             raise ContractError("openapi.yaml: route inventory differs from the implemented Stage 1 and M1 API")

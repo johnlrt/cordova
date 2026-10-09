@@ -19,8 +19,11 @@ The frontend displays only completed metadata. Prompts and generated text do not
 - Svelte dashboard, login, recovery and API-guide pages. It refreshes usage after a live invalidation and polls every 30 seconds as a fallback.
 - Local nginx TLS, SSE and WebSocket proxying, strict TLS versions, browser security headers, denied public readiness/metrics/payment routes, private Redis/Kafka/node networks, and generated local secrets/certificates.
 - OpenAPI account/key/usage routes and C3/C4 registries checked in CI without Docker or service credentials.
+- Optional C3 enrollment and HMAC challenge/JWT HTTP endpoints. They stay disabled unless both an AES-256 node-secret encryption key and an Ed25519 signing key are configured.
 
-The local mock-node WSS framing is an M1-only synthetic adapter. It is not yet the full C3 Rust-node session, signed-token, lease, and token-ID protocol. The Rust CLI and llama.cpp subprocess live in `node/`, but are not connected to this M1 gateway. This is an explicit remaining B2 integration gap; do not describe the current slice as real inference or as a qualified Rust-node connection.
+The local mock-node WSS framing is an M1-only synthetic adapter. The Go server now supports optional enrollment, access-token issuance, `/api/node/ws`, reconnect fencing, an empty C3 catalog snapshot, and heartbeat persistence. It does not dispatch inference, serve signed model manifests, or allocate Redis slot leases. The Rust CLI can establish a basic session, but cannot load a server-provided model or serve requests through this gateway. This remains an explicit B2/M2 integration gap; do not describe the current slice as real inference or as a qualified Rust-node connection.
+
+To enable the enrollment/auth HTTP routes, provide both `CORDOVA_NODE_SECRET_ENCRYPTION_KEY` and `CORDOVA_NODE_JWT_SIGNING_KEY`, or their `_FILE` variants. Values may be hex or base64; the encryption key is exactly 32 bytes, and the Ed25519 signing value may be a 32-byte seed or canonical 64-byte private key. Keep these outside source control and rotate them using the key-management procedure before production. When either key is missing, `/api/node/*` is not registered. Owner approval is protected by the dashboard session, same-origin check, and CSRF token; an approval UI has not been added yet.
 
 ## Start the local stack
 

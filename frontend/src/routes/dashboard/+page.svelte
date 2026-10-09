@@ -30,10 +30,15 @@
     const current = await session.ensureLoaded();
     if (!active || !current) return;
     resources.clear();
-    void resources.refreshUsage();
     const generation = session.generation;
     live = new LiveConnection(current, generation, {
-      onStatus: (status) => { if (active) liveStatus = status; },
+      onStatus: (status) => {
+        if (!active) return;
+        liveStatus = status;
+        if (status === 'connected' || (status === 'disconnected' && resources.usageStatus === 'idle')) {
+          void resources.refreshUsage();
+        }
+      },
       onInvalidate: (event) => {
         if (!active) return;
         resources.markStale(event.topic);

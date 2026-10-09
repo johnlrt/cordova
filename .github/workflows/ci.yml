@@ -107,12 +107,50 @@ jobs:
           make config-check
           # The generated files stay inside a mode-700 directory; make mounted test secrets readable by UID 10001.
           chmod 0644 .local/*
-          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml up --build --wait
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml up --build --wait || {
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps --all
+            for service_name in edge redpanda; do
+              service_container_id="$(docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps -q "$service_name")"
+              if [ -n "$service_container_id" ]; then
+                docker inspect --format "$service_name: {{json .State.Health}}" "$service_container_id" || true
+              fi
+            done
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color edge redis redpanda
+            exit 1
+          }
+          curl --fail --insecure --silent --show-error --max-time 5 https://127.0.0.1:8443/healthz || {
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps --all
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color edge
+            exit 1
+          }
       - name: Verify frontend auth and live usage through nginx
         working-directory: frontend
         env:
           CORDOVA_M1_ORIGIN: https://localhost:8443
         run: npm run test:m1
+      - name: Capture safe gateway diagnostics after M1 failure
+        if: failure()
+        run: docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color gateway
+      - name: Capture safe usage pipeline counters after M1 failure
+        if: failure()
+        run: |
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redis sh -c '
+            export REDISCLI_AUTH="$(cat /run/secrets/redis_password)"
+            printf "usage_outbox_length="
+            redis-cli --raw XLEN cv:v1:outbox:usage
+            printf "usage_recovery_pending="
+            redis-cli --raw SCARD cv:v1:usage:pending
+            redis-cli --raw --scan --pattern "cv:v1:account-usage:*" | while IFS= read -r key; do
+              printf "account_usage_rows="
+              redis-cli --raw XLEN "$key"
+            done
+            redis-cli --raw --scan --pattern "cv:v1:key-usage:*" | while IFS= read -r key; do
+              printf "key_usage_rows="
+              redis-cli --raw XLEN "$key"
+            done
+          '
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redpanda rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092 || true
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redpanda rpk group describe cordova-usage-projection-v1 --brokers redpanda:9092 || true
       - name: Verify M1 request and edge acceptance flows
         run: |
           make smoke

@@ -12,7 +12,7 @@ services:
       CORDOVA_M1_MODE: "true"
       CORDOVA_ENV: development
       CORDOVA_PUBLIC_ORIGIN: https://localhost:8443
-      CORDOVA_PRIVACY_NOTICE_VERSION: v1
+      CORDOVA_PRIVACY_NOTICE_VERSION: privacy-v1
       CORDOVA_REDIS_URL: redis://redis:6379/0
       CORDOVA_REDIS_PASSWORD_FILE: /run/secrets/redis_password
       CORDOVA_KAFKA_BROKERS: redpanda:9092
@@ -32,9 +32,11 @@ services:
         condition: service_healthy
       redpanda:
         condition: service_healthy
+      usage-topic-init:
+        condition: service_completed_successfully
       mock-node:
         condition: service_healthy
-    networks: [front, private]
+    networks: [private]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -81,13 +83,24 @@ services:
 
   redis:
     image: redis:7.4.2-alpine3.21
-    command: [sh, -c, "exec redis-server --appendonly yes --appendfsync everysec --requirepass \"$$(cat /run/secrets/redis_password)\""]
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        password="$$(cat /run/secrets/redis_password)"
+        find /data ! -user redis -exec chown redis:redis '{}' +
+        umask 077
+        printf 'appendonly yes\nappendfsync everysec\nrequirepass %s\n' "$$password" > /tmp/redis.conf
+        chown redis:redis /tmp/redis.conf
+        exec gosu redis redis-server /tmp/redis.conf
     secrets: [redis_password]
     volumes: [redis-data:/data]
     networks: [private]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
     pids_limit: 128
     mem_limit: 512m
@@ -128,10 +141,28 @@ services:
     mem_limit: 1g
     restart: unless-stopped
     healthcheck:
-      test: [CMD, rpk, cluster, health, --brokers, redpanda:9092]
+      test: [CMD, rpk, cluster, info, --brokers, redpanda:9092, --print-brokers]
       interval: 10s
       timeout: 5s
       retries: 20
+
+  usage-topic-init:
+    image: redpandadata/redpanda:v24.3.17
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - >-
+        rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092 >/dev/null 2>&1 ||
+        rpk topic create --brokers redpanda:9092 --partitions 1 --replicas 1 cordova.account.usage.v1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
 
   edge:
     image: cordova-edge:0.1.0
@@ -148,10 +179,11 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-    networks: [front]
+    networks: [front, private]
     read_only: true
     tmpfs: [/var/cache/nginx, /var/run]
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
     pids_limit: 128
     mem_limit: 128m
@@ -163,8 +195,7 @@ services:
       retries: 8
 
 networks:
-  front:
-    internal: true
+  front: {}
   private:
     internal: true
 

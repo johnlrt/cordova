@@ -7,6 +7,7 @@ import base64
 import http.cookiejar
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -63,6 +64,18 @@ class WebSocketStream:
         return json.loads(self.read(length))
 
 
+def has_hash_script_csp(document: bytes) -> bool:
+    meta = re.search(rb'<meta\s+http-equiv="content-security-policy"\s+content="([^"]+)"', document, re.IGNORECASE)
+    if not meta:
+        return False
+    policy = meta.group(1).decode("ascii", errors="ignore")
+    directive = re.search(r"(?:^|;)\s*script-src\s+([^;]+)", policy, re.IGNORECASE)
+    if not directive:
+        return False
+    sources = directive.group(1).split()
+    return "'self'" in sources and "'unsafe-inline'" not in sources and any(source.startswith("'sha256-") for source in sources)
+
+
 def main() -> int:
     try:
         context = ssl.create_default_context(cafile=str(ROOT / ".local/dev-ca.crt"))
@@ -78,11 +91,14 @@ def main() -> int:
 
         with request("/healthz") as response:
             health = json.load(response)
-            if health.get("stage") != "m1" or not response.headers.get("Strict-Transport-Security") or not response.headers.get("Content-Security-Policy"):
-                raise RuntimeError("TLS edge health headers are incomplete")
+            if health.get("stage") != "m1" or not response.headers.get("Strict-Transport-Security") or response.headers.get("X-Frame-Options") != "DENY":
+                raise RuntimeError("TLS edge security headers are incomplete")
         with request("/dashboard") as response:
-            if response.status != 200 or b"Recent usage" not in response.read():
+            dashboard = response.read()
+            if response.status != 200 or b"Checking your account session" not in dashboard:
                 raise RuntimeError("dashboard deep-link refresh failed")
+            if not has_hash_script_csp(dashboard):
+                raise RuntimeError("prerendered page is missing its hash-based script CSP")
         for path in ["/readyz", "/metrics", "/api/billing/address"]:
             try:
                 response = request(path)
@@ -95,7 +111,7 @@ def main() -> int:
 
         username = "edge-" + uuid.uuid4().hex[:16]
         password = "Cordova-edge-" + uuid.uuid4().hex
-        with request("/api/auth/register", {"username": username, "password": password, "privacy_notice_version": "v1"}) as response:
+        with request("/api/auth/register", {"username": username, "password": password, "privacy_notice_version": "privacy-v1"}) as response:
             auth = json.load(response)
         csrf = auth["csrf_token"]
         with request("/api/live-ticket", {}, {"X-CSRF-Token": csrf}) as response:

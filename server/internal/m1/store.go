@@ -2,6 +2,7 @@ package m1
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -46,13 +47,17 @@ var (
 )
 
 type Config struct {
-	Origin               string
-	PrivacyNoticeVersion string
-	Pepper               []byte
-	SecureCookies        bool
-	TrustProxy           bool
-	UsagePendingKey      string
+	Origin                  string
+	PrivacyNoticeVersion    string
+	Pepper                  []byte
+	NodeSecretEncryptionKey []byte
+	NodeJWTSigningKey       ed25519.PrivateKey
+	SecureCookies           bool
+	TrustProxy              bool
+	UsagePendingKey         string
 }
+
+const DefaultPrivacyNoticeVersion = "privacy-v1"
 
 type Store struct {
 	redis           *redis.Client

@@ -25,9 +25,26 @@ def main() -> int:
             fail("docker compose config failed; run make bootstrap-dev and inspect the Compose files")
         config = json.loads(result.stdout)
         services = config.get("services", {})
-        expected = {"gateway", "mock-node", "redis", "redpanda", "edge"}
+        expected = {"gateway", "mock-node", "redis", "redpanda", "usage-topic-init", "edge"}
         if set(services) != expected:
             fail("Compose service inventory does not match the M1 stack")
+        topic_init = services["usage-topic-init"]
+        topic_command = topic_init.get("command", [])
+        required_topic_steps = [
+            "rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092",
+            "rpk topic create --brokers redpanda:9092 --partitions 1 --replicas 1 cordova.account.usage.v1",
+        ]
+        if topic_init.get("entrypoint") != ["/bin/sh", "-ec"] or len(topic_command) != 1:
+            fail("the M1 usage topic must be explicitly provisioned with stable single-partition ordering")
+        if any(step not in topic_command[0] for step in required_topic_steps):
+            fail("the M1 usage topic must be explicitly provisioned with stable single-partition ordering")
+        topic_dependency = topic_init.get("depends_on", {}).get("redpanda", {})
+        gateway_topic_dependency = services["gateway"].get("depends_on", {}).get("usage-topic-init", {})
+        if topic_dependency.get("condition") != "service_healthy" or gateway_topic_dependency.get("condition") != "service_completed_successfully":
+            fail("the gateway must wait for successful usage topic provisioning")
+        gateway_environment = services["gateway"].get("environment", {})
+        if gateway_environment.get("CORDOVA_PRIVACY_NOTICE_VERSION") != "privacy-v1":
+            fail("the gateway must use the current privacy notice version")
         for name, service in services.items():
             ports = service.get("ports", [])
             if name != "edge" and ports:
@@ -42,12 +59,21 @@ def main() -> int:
                 source = volume.get("source", "") if isinstance(volume, dict) else ""
                 if source == "/var/run/docker.sock" or "docker.sock" in source:
                     fail("Docker socket mounts are forbidden")
-        for network in config.get("networks", {}).values():
-            if not network.get("internal", False):
-                fail("all M1 networks must be internal")
-        private = config.get("networks", {}).get("private", {})
+        networks = config.get("networks", {})
+        front = networks.get("front", {})
+        private = networks.get("private", {})
+        if front.get("internal", False):
+            fail("the edge front network must reach the host-published loopback port")
         if private.get("internal") is not True:
             fail("Redis, Kafka and mock-node require an internal network")
+        service_networks = {name: set(service.get("networks", {})) for name, service in services.items()}
+        if service_networks.get("edge") != {"front", "private"}:
+            fail("the edge must bridge the loopback-published front and isolated private networks")
+        if service_networks.get("gateway") != {"private"}:
+            fail("the gateway must remain isolated from the host-facing front network")
+        for name in {"mock-node", "redis", "redpanda", "usage-topic-init"}:
+            if service_networks.get(name) != {"private"}:
+                fail(f"{name} must attach only to the isolated private network")
 
         secret_names = ["app-pepper", "redis-password", "mock-node-token"]
         for name in secret_names:
@@ -82,7 +108,7 @@ def main() -> int:
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
         if ".local/" not in dockerignore or "**/node_modules/" not in dockerignore:
             fail("Docker build context must exclude secrets and installed dependencies")
-        print("PASS: versioned images, private networks, localhost-only edge, protected secrets and TLS identities")
+        print("PASS: versioned images, isolated private services, localhost-only edge, protected secrets and TLS identities")
         return 0
     except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
