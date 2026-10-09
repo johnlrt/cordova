@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"cordova/server/internal/inference"
@@ -27,6 +28,43 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string, 
 	if len(principal.AllowedModels) > 0 && !principal.AllowedModels[req.Model] {
 		fail(w, http.StatusForbidden, requestID, "forbidden", "This API key cannot use the requested model.")
 		return
+	}
+	idempotencyKey, present, valid := requestIdempotencyKey(r)
+	if !valid {
+		fail(w, http.StatusBadRequest, requestID, "invalid_request", "Idempotency-Key must be a single value of at most 128 characters without control characters.")
+		return
+	}
+	if present {
+		if s.idempotency == nil {
+			fail(w, http.StatusBadRequest, requestID, "unsupported_parameter", "Idempotency-Key storage is unavailable in this server mode.")
+			return
+		}
+		canonical, err := json.Marshal(req)
+		if err != nil {
+			fail(w, http.StatusServiceUnavailable, requestID, "storage_unavailable", "The request could not be recorded safely.")
+			return
+		}
+		decision, err := s.idempotency.Claim(r.Context(), principal, idempotencyKey, req.Model, requestID, canonical)
+		if err != nil {
+			if errors.Is(err, ErrIdempotencyUnauthorized) {
+				fail(w, http.StatusUnauthorized, requestID, "unauthenticated", "A valid API key is required.")
+				return
+			}
+			fail(w, http.StatusServiceUnavailable, requestID, "storage_unavailable", "The request could not be recorded safely.")
+			return
+		}
+		if !decision.Created {
+			code := "conflict"
+			if decision.Compared && !decision.BodyMatch {
+				writeIdempotencyConflict(w, requestID, decision.RequestID, code)
+				return
+			}
+			if decision.Status == "settled" || decision.Status == "cancelled" || decision.Status == "refunded" || decision.Status == "failed" {
+				code = "replay_unavailable"
+			}
+			writeIdempotencyConflict(w, requestID, decision.RequestID, code)
+			return
+		}
 	}
 	limit := 512
 	if req.MaxTokens != nil {
@@ -49,6 +87,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string, 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 	input := inference.Request{Messages: req.Messages, MaxTokens: limit, Parameters: parameters}
+	if s.executor != nil {
+		includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+		s.accountedChat(w, r, requestID, principal, req.Model, input, req.Stream, includeUsage, started, idempotencyKey)
+		return
+	}
 	completionID := "chatcmpl-" + requestID
 	created := time.Now().Unix()
 	if !req.Stream {
@@ -173,6 +216,39 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string, 
 			return
 		}
 	}
+}
+
+func requestIdempotencyKey(r *http.Request) (value string, present, valid bool) {
+	values := r.Header.Values("Idempotency-Key")
+	if len(values) == 0 {
+		return "", false, true
+	}
+	if len(values) != 1 {
+		return "", true, false
+	}
+	value = values[0]
+	if len(value) == 0 || utf8.RuneCountInString(value) > 128 || !utf8.ValidString(value) {
+		return "", true, false
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return "", true, false
+		}
+	}
+	return value, true, true
+}
+
+func writeIdempotencyConflict(w http.ResponseWriter, requestID, originalRequestID, code string) {
+	message := "A request with this idempotency key is already in progress."
+	if code == "replay_unavailable" {
+		message = "A request with this idempotency key already finished; its response is not retained."
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(errorResponse{
+		Error:     apiError{Message: message, Type: "invalid_request_error", Code: code},
+		RequestID: requestID, OriginalRequestID: originalRequestID,
+	})
 }
 
 func event(w http.ResponseWriter, value any) error {

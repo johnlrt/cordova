@@ -48,7 +48,7 @@ test('usage snapshots reject numeric money, extra fields and invalid states', ()
     charged_piconero: '0', latency_ms: 18, created_at: '2026-10-09T10:00:00Z', finished_at: '2026-10-09T10:00:01Z'
   };
   assert.equal(decodeUsagePage({ data: [row], next_cursor: null }).data[0].status, 'completed');
-  assert.throws(() => decodeUsagePage({ data: [{ ...row, status: 'settled' }], next_cursor: null }), ApiFailure);
+  assert.equal(decodeUsagePage({ data: [{ ...row, status: 'settled' }], next_cursor: null }).data[0].status, 'settled');
   assert.throws(() => decodeUsagePage({ data: [{ ...row, api_key_id: 'not-a-uuid' }], next_cursor: null }), ApiFailure);
   assert.throws(() => decodeUsagePage({ data: [{ ...row, charged_piconero: 0 }], next_cursor: null }), ApiFailure);
   assert.throws(() => decodeUsagePage({ data: [{ ...row, status: 'unknown' }], next_cursor: null }), ApiFailure);

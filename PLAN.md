@@ -1,7 +1,7 @@
 # Cordova — shared architecture and contracts
 
 **Goal:** Deliver a privacy-focused community inference network with an OpenAI-compatible API, accountable routing, and XMR funding and owner payouts.
-**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Status:** original implementation roadmap; see `README.md` for implemented features. The user's updated single-host pilot conditions are recorded in [docs/deployment-pilot.md](docs/deployment-pilot.md).
+**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Status:** a partial M1/M3 mock implementation exists; see [docs/stage-2.md](docs/stage-2.md), [docs/stage-3.md](docs/stage-3.md), and [docs/verification.md](docs/verification.md) for current scope and evidence. Code presence alone does not pass a milestone gate. The user's updated single-host pilot conditions are recorded in [docs/deployment-pilot.md](docs/deployment-pilot.md).
 
 Apply planiuer guides: Core (scope and dependencies), Security (untrusted nodes and custodial money), Quality (three implementation languages), First-Run (protocol, tokenizer, persistence and wallet verification). Skip none. The request for exactly four files overrides the skill's single-document output: this file owns all shared decisions and contracts; the other three own implementation tasks. Preserve `.old/`; its school-platform plans are unrelated.
 
@@ -85,7 +85,7 @@ docs/                      # Each agent owns its setup/runbook pages; shared dec
 
 ## Core 3 — Dependency-ordered milestones
 
-Commands below are acceptance commands to create, not commands verified against existing code. S/M/L indicate relative work size. Each row is a task with its own executable gate; per-agent decomposition lives in the linked plan.
+Commands below are acceptance commands. Their current implementation and evidence are recorded in `docs/verification.md`; code presence alone does not pass a gate. S/M/L indicate relative work size. Each row is a task with its own executable gate; per-agent decomposition lives in the linked plan.
 
 | Task | Imperative deliverable | Dependencies / parallelism | Size | Done when |
 | --- | --- | --- | --- | --- |
@@ -156,7 +156,7 @@ Reject unknown fields in Cordova REST/WS payloads. In `/v1/chat/completions`, re
 | `LedgerView` | `id`, `kind`, `request_id` Id/null, `amount_piconero` signed decimal string relative to account, `balance_after_piconero:Money`, `created_at`, `reference_id` string; never another account's IDs |
 | `PayoutSettings` | `address` string/null, `network`, `minimum_piconero:Money`, `changed_at` timestamp/null, `eligible_after` timestamp/null |
 | `Payout` | `id`, `amount_piconero:Money`, `status:queued|prepared|relaying|broadcast|confirmed|unknown|failed`, `txids:Hash[]`, `created_at`, `updated_at`, `hold_reason` enum/null |
-| `UsageRow` | `request_id`, `model_id`, `status:accepted|running|settled|refunded|cancelled|recovering`, `input_tokens`, `output_tokens`, `charged_piconero:Money`, `latency_ms` integer/null, `created_at`, `finished_at` timestamp/null |
+| `UsageRow` | `request_id`, `model_id`, `status:accepted|running|settled|refunded|cancelled|recovering`, `input_tokens`, `output_tokens`, `charged_piconero:Money|null` (null only while recovering), `latency_ms` integer/null, `created_at`, `finished_at` timestamp/null |
 | `Analytics` | `from`, `to`, `bucket:hour|day`, `buckets:[{start,requests,input_tokens,output_tokens,spend_piconero:Money,p50_latency_ms:null|integer,p95_latency_ms:null|integer,successes,failures}]` |
 
 `ModelDefinition` is `Model` with `availability` omitted: signed manifests contain immutable catalog/economic fields; the gateway adds current availability when producing the public Model DTO. `Page<T>` is `{data:T[],next_cursor:string|null}` ordered newest first with a signed opaque cursor. Default limit 50, maximum 100. `from/to` are UTC timestamps, maximum analytics span 30 days. Null means unavailable, never silently zero. Account DTOs omit HWID hashes, node secrets, fraud details and other owners' identifiers.
@@ -573,7 +573,7 @@ All decisions are resolved defaults; alternatives show the reversal cost, not qu
 
 - **N1 (M0):** Backend creates C1–C4/C9 schemas, generated type command and common fixtures. **Done when:** `make contracts-check` validates every listed endpoint/message and rejects the negative corpus.
 - **N2 (M0):** Backend runs tokenizer, money and wallet ambiguity spikes with actual external outputs. **Done when:** `make verify-foundations` produces versioned content-safe evidence for all three.
-- **N3 (M0):** Infra pins compatible tool/image versions and constructs the private stagenet Compose skeleton. **Done when:** `make config-check` and internal native-protocol probes pass with only nginx ports published.
+- **N3 (M0):** Infra first wires the Stage 2 contract checker into the existing pull-request CI, then pins compatible tool/image versions and constructs the private stagenet Compose skeleton. **Done when:** contract/schema/fixture errors fail CI; `make config-check` and internal native-protocol probes pass with only nginx ports published.
 - **N4 (M1):** Frontend implements typed session/catalog/dashboard shell against generated fixtures. **Done when:** the unauthenticated/authenticated browser smoke passes without hardcoded financial data.
 
 ## Changelog

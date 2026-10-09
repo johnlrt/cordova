@@ -76,8 +76,9 @@ type apiError struct {
 }
 
 type errorResponse struct {
-	Error     apiError `json:"error"`
-	RequestID string   `json:"request_id"`
+	Error             apiError `json:"error"`
+	RequestID         string   `json:"request_id"`
+	OriginalRequestID string   `json:"original_request_id,omitempty"`
 }
 
 type delta struct {

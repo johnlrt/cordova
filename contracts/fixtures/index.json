@@ -225,6 +225,26 @@
     "valid": true
   },
   {
+    "file": "rest/billing-balance.json",
+    "schema": "openapi.yaml#/components/schemas/Balance",
+    "valid": true
+  },
+  {
+    "file": "rest/request-status-settled.json",
+    "schema": "openapi.yaml#/components/schemas/RequestStatus",
+    "valid": true
+  },
+  {
+    "file": "rest/request-status-recovering.json",
+    "schema": "openapi.yaml#/components/schemas/RequestStatus",
+    "valid": true
+  },
+  {
+    "file": "rest/idempotency-replay-unavailable.json",
+    "schema": "openapi.yaml#/components/schemas/ErrorResponse",
+    "valid": true
+  },
+  {
     "file": "rest/live-ticket.json",
     "schema": "openapi.yaml#/components/schemas/LiveTicketResponse",
     "valid": true

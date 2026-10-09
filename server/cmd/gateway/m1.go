@@ -14,8 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"cordova/server/internal/billing"
+	"cordova/server/internal/domain"
 	"cordova/server/internal/m1"
 	"cordova/server/internal/mocknode"
+	"cordova/server/internal/request"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -58,6 +61,14 @@ func runM1(address string) error {
 	if err != nil {
 		return err
 	}
+	journal, err := billing.NewRedisJournal(rdb, os.Getenv("CORDOVA_ENV") != "development")
+	if err != nil {
+		return err
+	}
+	ledger, err := billing.NewRedisLedger(journal)
+	if err != nil {
+		return err
+	}
 	brokers := strings.TrimSpace(os.Getenv("CORDOVA_KAFKA_BROKERS"))
 	events, err := m1.NewEvents(rdb, brokers)
 	if err != nil {
@@ -88,6 +99,27 @@ func runM1(address string) error {
 	if err != nil {
 		return err
 	}
+	router, err := mocknode.NewRequestRouter(provider, "00000000-0000-4000-8000-000000000002", 4)
+	if err != nil {
+		return err
+	}
+	priceVersion, err := domain.ParseID("00000000-0000-4000-8000-000000000001")
+	if err != nil {
+		return err
+	}
+	zeroRate, err := domain.ParsePiconero("0")
+	if err != nil {
+		return err
+	}
+	coordinator, err := request.NewCoordinator(ledger, mocknode.SyntheticTokenizer{}, router)
+	if err != nil {
+		return err
+	}
+	executor, err := m1.NewAccountedExecutor(coordinator, billing.Price{Version: priceVersion,
+		InputRate: zeroRate, OutputRate: zeroRate, OwnerShareBPS: 0})
+	if err != nil {
+		return err
+	}
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer startupCancel()
 	for {
@@ -102,12 +134,24 @@ func runM1(address string) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	handler, err := m1.NewHandler(config, store, provider, func(ctx context.Context) error {
+	if _, err := ledger.Recover(startupCtx, time.Now().UTC()); err != nil {
+		return errors.New("M3 ledger recovery did not complete; gateway remains unavailable")
+	}
+	if err := store.ReconcileIdempotency(startupCtx, ledger); err != nil {
+		return errors.New("M3 idempotency recovery did not complete; gateway remains unavailable")
+	}
+	if err := store.ReconcileAccountedUsage(startupCtx, ledger); err != nil {
+		return errors.New("M3 usage projection recovery did not complete; gateway remains unavailable")
+	}
+	handler, err := m1.NewHandlerWithLedgerAndExecutor(config, store, executor, ledger, func(ctx context.Context) error {
 		if err := rdb.Ping(ctx).Err(); err != nil {
 			return errors.New("Redis is unavailable")
 		}
 		if err := events.Ping(ctx); err != nil {
 			return err
+		}
+		if !ledger.Ready() {
+			return errors.New("financial ledger recovery is incomplete")
 		}
 		return provider.Ping(ctx)
 	})

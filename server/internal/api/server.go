@@ -16,20 +16,25 @@ import (
 )
 
 type Server struct {
-	keyHash      [32]byte
-	provider     inference.Provider
-	slots        chan struct{}
-	authenticate Authenticator
-	usageSink    UsageSink
+	keyHash            [32]byte
+	provider           inference.Provider
+	executor           CompletionExecutor
+	slots              chan struct{}
+	authenticate       Authenticator
+	usageSink          UsageSink
+	accountedUsageSink AccountedUsageSink
+	idempotency        IdempotencyManager
+	requests           *RequestRegistry
 }
 
 // Principal contains only identity and authorization data needed by a handler.
 type Principal struct {
-	AccountID     string
-	Kind          string
-	Scopes        map[string]bool
-	KeyID         string
-	AllowedModels map[string]bool
+	AccountID             string
+	Kind                  string
+	Scopes                map[string]bool
+	KeyID                 string
+	AllowedModels         map[string]bool
+	DailySpendCapPiconero string
 }
 
 // Authenticator resolves an API key or a same-origin dashboard session.
@@ -61,6 +66,32 @@ func NewWithAuth(provider inference.Provider, authenticate Authenticator, usageS
 	}
 	// The single-host pilot serves one generation at a time in both standalone and M1 modes.
 	s := &Server{provider: provider, slots: make(chan struct{}, 1), authenticate: authenticate, usageSink: usageSink}
+	return http.HandlerFunc(s.serve), nil
+}
+
+// NewWithAuthAndExecutor composes the C2 chat surface with the M3 request
+// coordinator. It deliberately has no inference.Provider fallback.
+func NewWithAuthAndExecutor(executor CompletionExecutor, authenticate Authenticator,
+	usageSink AccountedUsageSink) (http.Handler, error) {
+	return NewWithAuthAndExecutorAndIdempotency(executor, authenticate, usageSink, nil)
+}
+
+// NewWithAuthAndExecutorAndIdempotency composes the accounted chat API with
+// the durable client idempotency index used by the M1/M3 gateway.
+func NewWithAuthAndExecutorAndIdempotency(executor CompletionExecutor, authenticate Authenticator,
+	usageSink AccountedUsageSink, idempotency IdempotencyManager) (http.Handler, error) {
+	return NewWithAuthAndExecutorRuntime(executor, authenticate, usageSink, idempotency, nil)
+}
+
+// NewWithAuthAndExecutorRuntime also installs the active-request registry used
+// by the account API to cancel requests after key revocation.
+func NewWithAuthAndExecutorRuntime(executor CompletionExecutor, authenticate Authenticator,
+	usageSink AccountedUsageSink, idempotency IdempotencyManager, requests *RequestRegistry) (http.Handler, error) {
+	if executor == nil || authenticate == nil {
+		return nil, fmt.Errorf("completion executor and authenticator must be configured")
+	}
+	s := &Server{executor: executor, slots: make(chan struct{}, 1), authenticate: authenticate,
+		accountedUsageSink: usageSink, idempotency: idempotency, requests: requests}
 	return http.HandlerFunc(s.serve), nil
 }
 
@@ -115,10 +146,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if principal.Kind != "key" || !principal.Scopes["chat:write"] {
 		fail(w, http.StatusForbidden, requestID, "forbidden", "This credential cannot create chat completions.")
-		return
-	}
-	if r.Header.Get("Idempotency-Key") != "" {
-		fail(w, 400, requestID, "unsupported_parameter", "Idempotency storage is not implemented in stage 1.")
 		return
 	}
 	select {
