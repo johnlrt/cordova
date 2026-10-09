@@ -89,15 +89,29 @@ test('M1 account dashboard receives real usage invalidation and isolates account
   expect(result.body).toContain('"usage"');
 
   await expect.poll(async () => page.evaluate(async (requestId) => {
-    const response = await fetch('/api/usage?limit=5', { credentials: 'same-origin' });
-    if (!response.ok) return `http:${response.status}`;
-    const usage = await response.json() as { data?: Array<{ request_id?: string }> };
-    return usage.data?.some((row) => row.request_id === requestId) ? 'present' : 'absent';
+    const [usageResponse, requestResponse] = await Promise.all([
+      fetch('/api/usage?limit=5', { credentials: 'same-origin' }),
+      fetch(`/api/requests/${encodeURIComponent(requestId)}`, { credentials: 'same-origin' })
+    ]);
+    const usage = usageResponse.ok
+      ? await usageResponse.json() as { data?: Array<{ request_id?: string }> }
+      : null;
+    const request = requestResponse.ok
+      ? await requestResponse.json() as { status?: string }
+      : null;
+    const usageRequestIds = usage?.data?.map((row) => row.request_id).filter((id): id is string => Boolean(id)) ?? [];
+    return {
+      usageStatus: usageResponse.status,
+      usageRequestIds,
+      requestStatus: requestResponse.status,
+      requestState: request?.status ?? null,
+      hasRequest: usageRequestIds.includes(requestId)
+    };
   }, result.requestId), {
     message: 'REST usage projection did not contain the completed request',
     timeout: 15_000,
     intervals: [250, 500, 1_000, 2_000]
-  }).toBe('present');
+  }).toMatchObject({ hasRequest: true });
   await expect(page.getByText(`#${result.requestId.slice(0, 8)}`)).toBeVisible();
   await expect(page.locator('body')).not.toContainText(prompt);
 

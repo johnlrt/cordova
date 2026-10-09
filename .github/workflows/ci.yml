@@ -128,6 +128,9 @@ jobs:
         env:
           CORDOVA_M1_ORIGIN: https://localhost:8443
         run: npm run test:m1
+      - name: Capture safe gateway diagnostics after M1 failure
+        if: failure()
+        run: docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color gateway
       - name: Verify M1 request and edge acceptance flows
         run: |
           make smoke
