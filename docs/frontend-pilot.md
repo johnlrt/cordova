@@ -8,7 +8,7 @@
 
 Аккаунтный клиент использует same-origin cookie credentials, `no-store`, CSRF для авторизованных POST, безопасные типизированные ошибки и отменяемые чтения. Dashboard загружает только метаданные `/api/usage`; он не читает и не показывает текст запросов. C4 WebSocket получает одноразовый ticket через POST, отправляет его первым кадром, проверяет envelope, порядок sequence, account binding, дубликаты и ревизии. Live-событие приводит к повторному REST-запросу; при потере сокета включается 30-секундный опрос, при скрытии вкладки соединение останавливается. Сессия, кэш истории и курсор не сохраняются в `localStorage`.
 
-Текущий Go gateway пока не реализует `/api/auth/register`, `/api/auth/login`, `/api/auth/recover`, `/api/session`, `/api/auth/logout`, `/api/usage`, `/api/live-ticket` или `/api/live`. Поэтому аккаунтные формы собраны по C2/C4, но реальная регистрация и live-обновления заработают только после серверной M1-интеграции. Текущая страница входа покажет понятную ошибку сервиса, а dashboard не подставит фиктивные аккаунтные данные.
+В режиме M1 Go gateway реализует регистрацию, вход, восстановление, сессии, историю usage и C4 live-канал. HTTPS nginx отдаёт собранный frontend и проксирует account/API/WebSocket-запросы в шлюз. Быстрый `scripts/start.ps1` запускает отдельный Stage 1 mock API и не поднимает аккаунты; для настоящего M1-пути нужен Compose-стек из `infra/`.
 
 Интерфейс открывается на английском. Переключатель `EN` / `RU` в верхней панели меняет язык всех четырёх разделов, сообщений об ошибках и окна подключения; выбор сохраняется в `localStorage` под ключом `cordova-language`.
 
@@ -72,4 +72,11 @@ npm.cmd run test:browser
 npm.cmd run build
 ```
 
-`npm.cmd run check`, `npm.cmd run check:browser`, `npm.cmd run test:unit`, `npm.cmd run test:browser` и `npm.cmd run build` проверяют типы, DTO/auth/live границы, пять Chromium-сценариев на тестовых REST/WebSocket fixtures и статическую сборку. Один сценарий подтверждает, что live invalidation обновляет usage только после подтверждающего REST-ответа. Эти fixtures не заменяют серверные проверки: реальная регистрация и live обновления всё ещё ждут C2/C4 endpoints, а smoke через nginx — M1 integration. Go-тесты дополнительно проверяют static UI, отсутствие листинга каталогов, сохранение авторизации API и недоступность файлов вне сборки. Проверки на реальном Ultra, ускорители и inference в этот frontend-этап не входят.
+`npm.cmd run check`, `npm.cmd run check:browser`, `npm.cmd run test:unit`, `npm.cmd run test:browser` и `npm.cmd run build` проверяют типы, DTO/auth/live границы, пять Chromium-сценариев на тестовых REST/WebSocket fixtures и статическую сборку. Для браузерной проверки через реальную M1-связку поднимите Compose-стек (`make bootstrap-dev`, `make config-check`, `make up`), затем в PowerShell выполните:
+
+```powershell
+$env:CORDOVA_M1_ORIGIN = 'https://localhost:8443'
+npm.cmd run test:m1
+```
+
+Сценарий регистрирует одноразовые локальные аккаунты, отправляет запрос в синтетическую WSS-ноду и проверяет, что dashboard обновился через live-инвалидацию и REST, а другой аккаунт не видит его историю. `make smoke` и `make test-edge` дополнительно проверяют mock inference, usage projection, nginx TLS/deep links и C4 WebSocket. Все эти проверки входят в GitHub Actions; локальная проверка Compose требует Docker Desktop/Compose и OpenSSL. Inference остаётся синтетическим, тестовые кредиты нулевые; проверка на железе truekant не заявляется.

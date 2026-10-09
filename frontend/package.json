@@ -19,6 +19,7 @@
     "check:browser": "tsc --project ./tsconfig.browser.json",
     "test:unit": "node --experimental-strip-types --test tests/*.test.ts",
     "test:browser": "playwright test",
+    "test:m1": "playwright test --config=playwright.m1.config.ts",
     "test": "npm run test:unit"
   },
   "devDependencies": {
