@@ -88,9 +88,9 @@ services:
         set -eu
         password="$$(cat /run/secrets/redis_password)"
         find /data ! -user redis -exec chown redis:redis '{}' +
+        umask 077
         printf 'appendonly yes\nappendfsync everysec\nrequirepass %s\n' "$$password" > /tmp/redis.conf
         chown redis:redis /tmp/redis.conf
-        chmod 0600 /tmp/redis.conf
         exec gosu redis redis-server /tmp/redis.conf
     secrets: [redis_password]
     volumes: [redis-data:/data]
