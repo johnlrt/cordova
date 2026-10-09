@@ -1,9 +1,11 @@
 # Cordova — frontend agent plan
 
 **Goal:** Implement a clear account dashboard and public setup documentation for Cordova using TypeScript and Svelte.
-**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Owner:** frontend agent. **Status:** first pilot slice implemented; account dashboard roadmap remains queued.
+**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Owner:** frontend agent. **Status:** pilot plus F1/F2 account frontend implemented against PLAN C2/C4; end-to-end M1 awaits gateway auth, usage and live endpoints.
 
-**Pilot update (2026-10-09):** `frontend/` now provides a bilingual dark static SvelteKit shell with overview, declared single-host configuration, authenticated live mock catalog and API documentation. It uses the existing stage-1 Bearer API, not the future cookie/account API. The interface uses platform system typography, a readable hierarchy, consistent cards and clear interaction feedback while retaining Cordova's own visual identity. No sign-up, account balances, node enrollment, payouts, inference playground, generated account contracts or live node telemetry exist yet. Health latency samples belong only to the current browser session. Scope and setup: [docs/frontend-pilot.md](docs/frontend-pilot.md). The remaining sections describe future work.
+**Pilot update (2026-10-09):** `frontend/` now provides a bilingual dark static SvelteKit shell with overview, declared single-host configuration, authenticated live mock catalog and API documentation. The pilot uses the existing stage-1 Bearer API. The interface uses platform system typography, a readable hierarchy, consistent cards and clear interaction feedback while retaining Cordova's own visual identity. The mock pilot still has no real inference, billing or measured node telemetry. Health latency samples belong only to the current browser session. Scope and setup: [docs/frontend-pilot.md](docs/frontend-pilot.md).
+
+**M1 frontend update (2026-10-09):** `/` is a product entry and the existing mock pilot is at `/pilot`. `/login`, `/register`, `/recover` and protected `/dashboard` implement F1; same-origin typed account REST, request-history snapshots and C4 live invalidation implement the frontend portion of F2. Recovery codes and live cursors stay in memory. The current Go gateway does not yet implement `/api/auth/*`, `/api/session`, `/api/usage`, `/api/live-ticket` or `/api/live`; real browser auth, nginx deep-link smoke and live-service tests remain integration gates, not passed frontend checks.
 
 Apply planiuer Core (pages and dependencies), Security (credentials and account data), Quality (typed components), and First-Run (real contract/browser checks). Skip none. Read [PLAN.md](PLAN.md) before implementation: it exclusively owns shared API/WS schemas, authentication, privacy statements, pricing, money types and milestone gates. This file owns routes, components, state, frontend verification and user-facing behavior. Do not redefine a shared contract here.
 
@@ -184,8 +186,8 @@ Before running browser tests, validate `PUBLIC_ORIGIN`, generated types, safe te
 ## Next actions
 
 - **FN1 (F0):** Scaffold locked static SvelteKit and generated API imports. **Done when:** `npm ci && npm run check && npm run contracts:check` passes.
-- **FN2 (F1):** Build account session/navigation and the privacy/recovery-code flow. **Done when:** auth browser smoke and obsolete-session cache test pass.
-- **FN3 (F2):** Connect typed REST and ticket-authenticated live invalidation. **Done when:** duplicate/resync/logout live tests pass against M1 services.
+- **FN2 (F1):** Account session/navigation and privacy/recovery-code flow are implemented. **Done when:** auth browser smoke through nginx and obsolete-session isolation test pass against C2 endpoints.
+- **FN3 (F2):** Typed account REST and ticket-authenticated C4 live client are implemented. **Done when:** duplicate/resync/logout live browser tests pass against M1 services.
 - **FN4 (F3/F4):** Implement node and key pages with fixture/live contracts. **Done when:** onboarding and secret-reveal browser workflows pass without persistent secrets.
 
 ## Changelog

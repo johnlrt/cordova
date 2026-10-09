@@ -12,11 +12,13 @@ export class ApiFailure extends Error {
   readonly code: string;
   readonly status: number;
   readonly requestId: string;
-  constructor(code: string, status = 0, requestId = '') {
+  readonly retryAfter: number | null;
+  constructor(code: string, status = 0, requestId = '', retryAfter: number | null = null) {
     super(code);
     this.code = code;
     this.status = status;
     this.requestId = requestId;
+    this.retryAfter = retryAfter;
   }
 }
 

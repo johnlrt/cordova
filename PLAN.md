@@ -495,7 +495,7 @@ Block merge on `cargo audit`, `govulncheck`, `npm audit --audit-level=high`, `ca
 
 ## Security 4 — Privacy posture
 
-Publish this exact claim in dashboard onboarding, key creation, setup guides and node docs: **Community nodes receive prompts in plaintext and can copy them. Cordova cannot technically prevent this on consumer hardware. Do not submit secrets or data you cannot disclose to the serving node. A small disclosed verification sample may also reach a second community node.** The central server and trusted tokenizer also process content in memory; TLS protects transport, not those endpoints.
+Publish this exact claim in dashboard onboarding, key creation, setup guides and node docs: **Community nodes receive prompts in plaintext and can copy them. Cordova cannot technically prevent this on consumer hardware. Do not submit secrets or data you cannot disclose to the serving node. A small disclosed verification sample may also reach a second community node.** Use `privacy-v1` as the stable `privacy_notice_version` for this exact claim; increment it only when the notice text changes. The central server and trusted tokenizer also process content in memory; TLS protects transport, not those endpoints.
 
 Normal logs contain only route templates, status, safe error codes, latency, request IDs and approved operational counters; no URL query strings, auth headers, addresses, account usernames, prompts, outputs or native response bodies. Metrics labels exclude account/key/request/node IDs where cardinality or linkage is unnecessary. Disable tracing payload capture and third-party session replay. Model hosts learn node download metadata; the trusted chain daemon sees wallet RPC network traffic; document both. No third-party frontend analytics.
 

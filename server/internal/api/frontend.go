@@ -19,7 +19,8 @@ func WithFrontend(api http.Handler, directory string) (http.Handler, error) {
 	}
 	static := http.FileServer(http.FS(files))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/") {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/") ||
+			r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
 			api.ServeHTTP(w, r)
 			return
 		}
@@ -33,6 +34,13 @@ func WithFrontend(api http.Handler, directory string) (http.Handler, error) {
 			name = "."
 		}
 		info, err := fs.Stat(files, name)
+		if err != nil && name != "." && !strings.HasSuffix(name, ".html") {
+			cleanHTML := name + ".html"
+			if htmlInfo, htmlErr := fs.Stat(files, cleanHTML); htmlErr == nil && htmlInfo.Mode().IsRegular() {
+				name, info, err = cleanHTML, htmlInfo, nil
+				r.URL.Path = "/" + cleanHTML
+			}
+		}
 		if err != nil {
 			http.NotFound(w, r)
 			return
