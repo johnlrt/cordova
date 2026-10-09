@@ -36,6 +36,13 @@ func NewProvider(endpoint, token string, roots *x509.CertPool) (*Provider, error
 }
 
 func (p *Provider) Generate(ctx context.Context, req inference.Request, emit func(string) error) (inference.Result, error) {
+	return p.GenerateAccepted(ctx, req, nil, emit)
+}
+
+// GenerateAccepted reports the mock node's acceptance frame before it emits
+// any completion text. M1 uses this only to exercise the M3 streaming boundary.
+func (p *Provider) GenerateAccepted(ctx context.Context, req inference.Request, accepted func() error,
+	emit func(string) error) (inference.Result, error) {
 	if req.MaxTokens < 1 || req.MaxTokens > 2048 || len(req.Messages) == 0 || len(req.Messages) > 128 {
 		return inference.Result{}, errors.New("invalid mock inference request")
 	}
@@ -89,6 +96,7 @@ func (p *Provider) Generate(ctx context.Context, req inference.Request, emit fun
 	var output strings.Builder
 	completed := false
 	finishReason := ""
+	acceptedSeen := false
 	for !completed {
 		if err := ctx.Err(); err != nil {
 			return inference.Result{}, err
@@ -109,7 +117,20 @@ func (p *Provider) Generate(ctx context.Context, req inference.Request, emit fun
 		}
 		expectedSequence++
 		switch frameIn.Type {
+		case "accepted":
+			if acceptedSeen || frameIn.Text != "" || frameIn.FinishReason != "" || frameIn.Usage != nil {
+				return inference.Result{}, errors.New("mock node acceptance is invalid")
+			}
+			acceptedSeen = true
+			if accepted != nil {
+				if err := accepted(); err != nil {
+					return inference.Result{}, err
+				}
+			}
 		case "delta":
+			if !acceptedSeen {
+				return inference.Result{}, errors.New("mock node sent content before accepting inference")
+			}
 			if frameIn.Text == "" || len(frameIn.Text) > maxDeltaBytes || !utf8.ValidString(frameIn.Text) {
 				return inference.Result{}, errors.New("mock node delta is invalid")
 			}
@@ -122,7 +143,7 @@ func (p *Provider) Generate(ctx context.Context, req inference.Request, emit fun
 				return inference.Result{}, err
 			}
 		case "complete":
-			if frameIn.Usage == nil || (frameIn.FinishReason != "stop" && frameIn.FinishReason != "length") {
+			if !acceptedSeen || frameIn.Usage == nil || (frameIn.FinishReason != "stop" && frameIn.FinishReason != "length") {
 				return inference.Result{}, errors.New("mock node completion is invalid")
 			}
 			finishReason = frameIn.FinishReason

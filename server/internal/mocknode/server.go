@@ -109,6 +109,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		finish = "length"
 	}
 	sequence := 1
+	if err := conn.WriteJSON(frame{Version: 1, Type: "accepted", RequestID: request.RequestID, Sequence: sequence}); err != nil {
+		return
+	}
+	sequence++
 	for i, word := range words {
 		if s.delay > 0 {
 			timer := time.NewTimer(s.delay)

@@ -1,0 +1,35 @@
+# M3 — учёт запросов и восстановление
+
+Дата снимка: 2026-10-09. Этот этап реализует основу C5 из `PLAN.md` и B7 из `PLAN-back.md`; наличие кода не означает прохождение внешних M0/M2 проверок или завершение M3.
+
+**Статус:** C5 ledger/recovery и сквозной coordinator path для M1 mock API реализованы и проверены на временном Redis 8.10.2 с AOF/`WAITAOF`. M3 acceptance не пройден: финальный gate зависит от незакрытого M2, а crash injection и production replica fsync не проверены.
+
+## Реализовано
+
+- Эталонная Go-модель ledger считает резерв, фактическую стоимость, долю владельца и возврат целочисленно, хранит сбалансированные append-only проводки и сверяет hash chain, денежные остатки и дневные лимиты.
+- Lifecycle поддерживает резерв до отправки, полный refund неудачной попытки, один retry на другого владельца, settlement и отмену с проверенным префиксом вывода. Координатор закрывает retry-окно, если второй владелец недоступен. Повтор операций идемпотентен; гонки terminal операций разрешаются через compare-and-set.
+- Redis-адаптер хранит денежные суммы десятичными строками. Один Lua вызов проверяет типы ключей, состояние, ревизию, проводки и spend cap до первой записи, затем вместе обновляет ledger, балансы, tombstone, outbox, request metadata и cap counters. Lua не преобразует денежные значения через `tonumber`.
+- Записи Redis выполняются на выделенном соединении с последующим `WAITAOF`; при неопределённой устойчивости ledger открывает circuit. `Recover` сначала проверяет journal replay, возвращает orphan reservations, закрывает незавершённое retry-окно, сверяет cap counters и только потом открывает readiness.
+- `internal/request` содержит coordinator, который считает input до резерва, резервирует до dispatch, повторяет один сбой до первого SSE chunk только на другом owner, считает полный накопленный текст для output и подтверждает settlement до успеха. На отмене списывается только префикс, flush которого подтвердил writer; M1 HTTP completion path подключён к этому coordinator.
+- Gateway запускает ledger recovery, reconciles pending idempotency mappings и восстанавливает terminal usage projections до открытия listener; readiness остаётся закрытой при любой ошибке recovery. Финансовая Lua-операция атомарно добавляет terminal request в usage-recovery set, а outbox-публикация снимает его только вместе с записью события. Добавлены owner/key-scoped `GET /api/requests/{id}` и session-only `GET /api/billing/balance`; `/api/usage` показывает content-free usage metadata.
+- `POST /v1/chat/completions` в M1 теперь проходит через `AccountedExecutor` → `request.Coordinator` → bounded WSS mock router → Redis ledger. `inference.accepted` mock frame precedes SSE headers; only successfully flushed chunks extend the cancellation prefix; success `[DONE]` follows durable settlement. Request usage projections carry settled/refunded/cancelled status and charge.
+- `Idempotency-Key` теперь хранится как HMAC-scoped mapping по account/API key. Gateway сравнивает канонический digest тела в течение 30 дней, возвращает 409 для активного или несовпадающего запроса и `replay_unavailable` с исходным request ID после завершения; текст ответа не сохраняется. Startup reconciliation связывает оставшиеся pending mappings с уже восстановленным Redis ledger.
+- M1 uses `SyntheticTokenizer` and a zero-rate price snapshot. Its counts are explicitly non-billable test metadata. This path proves composition and lifecycle wiring; it does not prove tokenizer parity or enable real charges.
+- The process-local mock router bounds leases and fences active attempts when its synthetic session disconnects/reconnects. It is a test adapter, not C3 signed node authentication, Redis-backed lease ownership, or the five C6 routing tiers.
+- Добавлена Redis integration suite для точности выше `2^53`, повторов, retry, orphan recovery, сохранения settlement, terminal usage queue, projection recovery, idempotency claim/replay/recovery и отказа до мутации при неверном Redis key type. `make test-ledger-redis` запускает billing и M1 integration suite на отдельном локальном Redis с AOF.
+- Reference tests cover concurrent cap reservation, competing terminal operations, crash snapshots before and after orphan recovery, abandoned retry windows, preserved settlement, and verified-prefix cancellation. Live Redis tests cover >2^53 money, retry, cancellation, orphan recovery, journal replay and wrong key types; they do not inject a process/connection crash at every Redis write/barrier boundary.
+
+## Что ещё не закрыто
+
+- Production tokenizer C9 and real-model parity are absent. The live M1 composition remains zero-priced and must never be used to charge real accounts.
+- Node routing still uses one process-local mock owner. C3 challenge/JWT authentication, reconnect-fenced real sessions, Redis slot/load leases, catalog verification, and C6 loaded/busy/on-disk/absent/no-capacity priorities remain unimplemented.
+- M1 API-key revocation now fences new local request registrations and cancels active request contexts after the key is revoked in Redis. Idempotency mappings and usage projections reconcile from ledger state at startup; live Redis execution and injected crashes around the distinct API claim, financial append, and projection boundaries are still unverified.
+- REST handlers статуса/баланса отражены в OpenAPI и fixtures, но сквозной тест через HTTP auth и Redis-backed ledger ещё не выполнен.
+- Для live suite был временно собран официальный Redis 8.10.2 с AOF и проверен `WAITAOF`; эта версия не закреплена проектом в M0, реплики не было, а crash injection на каждой write/barrier границе не выполнялся.
+- C3 session fencing и lease cleanup для реальных node sessions отсутствуют. Live Redis integration проверила ledger restart recovery и отдельное восстановление content-free usage projection, но не восстановление подключённых реальных нод.
+- Отмена API-key requests проверена локальным registry-тестом; fencing late completion от реальной C3-ноды и shutdown coordination с активными Redis leases ещё отсутствуют. Reference tests подтверждают coordinator-level retry/cancel правила, но не эти runtime races.
+- `PLAN.md` ставит финальный M3 gate после M2. Реальный tokenizer/model parity, routing priorities и cross-platform node transport не прошли свои M0/M2 критерии; текущий mock не заменяет эти доказательства.
+
+## Проверки
+
+См. актуальные команды и ограничения среды в [verification.md](verification.md). `make test-ledger-recovery` запускает race-тесты domain/reference ledger/coordinator. Для Redis gate используйте отдельный Redis с включённым AOF и `CORDOVA_TEST_REDIS_URL=redis://127.0.0.1:<port>/<db>` либо абсолютный локальный Unix socket URL; integration tests используют UUID-scoped ключи и очищают только созданные записи. Цели Makefile теперь определены; Redis цель завершается ошибкой, если URL не задан.
