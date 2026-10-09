@@ -20,6 +20,8 @@ var (
 	ErrInputLimit           = errors.New("authoritative input limit exceeded")
 	ErrOutputLimit          = errors.New("authoritative output limit exceeded")
 	ErrNoCapacity           = errors.New("no eligible inference capacity")
+	ErrModelWarming         = errors.New("model is warming on eligible nodes")
+	ErrModelNotFound        = errors.New("model is not in the verified catalog")
 	ErrNodeFailed           = errors.New("inference attempt failed")
 	ErrClientCancelled      = errors.New("client cancelled the request")
 )
@@ -143,13 +145,14 @@ func (c *Coordinator) Execute(ctx context.Context, params Params, input inferenc
 	for attemptNumber := 1; attemptNumber <= 2; attemptNumber++ {
 		attempt, acquireErr := c.router.Acquire(runCtx, params.ModelID, excludedOwners, params.Deadline)
 		if acquireErr != nil {
+			routeErr := normalizeRouteError(acquireErr)
 			if requestOpenForRetry {
 				if abandonErr := c.abandonRetry(ctx, params); abandonErr != nil {
-					return Result{Status: "recovering"}, errors.Join(ErrNoCapacity, abandonErr)
+					return Result{Status: "recovering"}, errors.Join(routeErr, abandonErr)
 				}
-				return Result{Usage: usage(inputTokens, 0), Status: string(billing.RequestRefunded)}, ErrNoCapacity
+				return Result{Usage: usage(inputTokens, 0), Status: string(billing.RequestRefunded)}, routeErr
 			}
-			return Result{}, ErrNoCapacity
+			return Result{}, routeErr
 		}
 		if attempt == nil {
 			if requestOpenForRetry {
@@ -277,6 +280,17 @@ func (c *Coordinator) Execute(ctx context.Context, params Params, input inferenc
 		return Result{Usage: usage(inputTokens, 0), Status: string(billing.RequestRefunded)}, ErrNoCapacity
 	}
 	return Result{}, ErrNoCapacity
+}
+
+func normalizeRouteError(err error) error {
+	switch {
+	case errors.Is(err, ErrModelWarming):
+		return ErrModelWarming
+	case errors.Is(err, ErrModelNotFound):
+		return ErrModelNotFound
+	default:
+		return ErrNoCapacity
+	}
 }
 
 type attemptOutcome struct {

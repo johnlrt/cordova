@@ -64,6 +64,10 @@ func mapCompletionError(err error) *api.CompletionFailure {
 		return failure(http.StatusServiceUnavailable, "node_failed", "The inference attempt exceeded its allowed output.", 2)
 	case errors.Is(err, request.ErrNoCapacity):
 		return failure(http.StatusServiceUnavailable, "no_capacity", "No eligible inference capacity is available.", 2)
+	case errors.Is(err, request.ErrModelWarming):
+		return failure(http.StatusServiceUnavailable, "model_warming", "Eligible nodes are preparing the requested model.", 5)
+	case errors.Is(err, request.ErrModelNotFound):
+		return failure(http.StatusNotFound, "model_not_found", "The requested model is not in the verified catalog.", 0)
 	case errors.Is(err, request.ErrNodeFailed):
 		return failure(http.StatusServiceUnavailable, "node_failed", "The inference node could not complete the request.", 2)
 	case errors.Is(err, request.ErrClientCancelled):

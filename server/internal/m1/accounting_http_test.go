@@ -11,6 +11,7 @@ import (
 	"cordova/server/internal/api"
 	"cordova/server/internal/billing"
 	"cordova/server/internal/domain"
+	"cordova/server/internal/request"
 )
 
 func TestBillingBalanceRequiresSessionAndReturnsExactMoneyStrings(t *testing.T) {
@@ -135,6 +136,26 @@ func TestRequestStatusUsesUnknownChargeWhileLedgerIsRecovering(t *testing.T) {
 	}
 	if reader.operationCalls != 0 {
 		t.Fatalf("recovery response read uncertain terminal operation %d times", reader.operationCalls)
+	}
+}
+
+func TestCompletionRoutingErrorsUseContractStatusAndRetryAfter(t *testing.T) {
+	cases := []struct {
+		err        error
+		statusCode int
+		code       string
+		retryAfter int
+	}{
+		{err: request.ErrModelWarming, statusCode: http.StatusServiceUnavailable, code: "model_warming", retryAfter: 5},
+		{err: request.ErrNoCapacity, statusCode: http.StatusServiceUnavailable, code: "no_capacity", retryAfter: 2},
+		{err: request.ErrModelNotFound, statusCode: http.StatusNotFound, code: "model_not_found"},
+	}
+	for _, test := range cases {
+		failure := mapCompletionError(test.err)
+		if failure.StatusCode != test.statusCode || failure.Code != test.code || failure.RetryAfterSeconds != test.retryAfter {
+			t.Errorf("mapCompletionError(%v) = %+v, want status=%d code=%q retry=%d", test.err, failure,
+				test.statusCode, test.code, test.retryAfter)
+		}
 	}
 }
 

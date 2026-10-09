@@ -38,12 +38,12 @@
 
 | Проверка | Результат | Ограничение |
 | --- | --- | --- |
-| `go fmt ./...` | Прошла из `server/` | Выполнена установленным `go1.27.1`; `go.mod` требует `1.27.2`. |
-| `go test ./...` | Все Go packages прошли, включая API accounting/idempotency, key-revocation cancellation, M1 executor, bounded mock leases, ledger и coordinator | Выполнена установленным `go1.27.1`; без `CORDOVA_TEST_REDIS_URL` integration cases пропускаются. |
-| `go test -race -count=1 ./...` | Все Go packages прошли, включая idempotency и active-request registry тесты | Выполнена установленным `go1.27.1`; без `CORDOVA_TEST_REDIS_URL` integration cases пропускаются. |
-| `go vet ./...` | Прошла | Выполнена установленным `go1.27.1`. |
-| `go build ./cmd/gateway ./cmd/mock-node` | Прошла | Компилирует Go gateway и mock-node; не доказывает работу внешних сервисов. |
-| `make test-ledger-recovery` | Race tests reference ledger/coordinator, API idempotency/cancel, M1 request path и mock routing прошли | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; crash injection на каждой Redis write/barrier границе не выполнен. |
+| `go fmt ./...` | Прошла из `server/` | Выполнена установленным `go1.27.2`. |
+| `go test -count=1 ./...` | Все Go packages прошли, включая coordinator/API route errors и mock C6 tiered router | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`. |
+| `go test -race -count=1 ./...` | Все Go packages прошли под race detector, включая загрузку/прогрев моделей и fencing тесты | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; C3 live sessions не реализованы. |
+| `go vet ./...` | Прошла | Выполнена установленным `go1.27.2`. |
+| `go build ./cmd/gateway ./cmd/mock-node` | Прошла | Компилирует Go gateway и mock-node; tiered router пока не подключён к gateway. |
+| `make test-ledger-recovery` | Race tests ledger/coordinator, API idempotency/cancel, M1 request path и mock C6 routing прошли | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; crash injection на каждой Redis write/barrier границе не выполнен. |
 | `make test-ledger-redis` | Прошла с Redis 8.10.2, AOF/`appendfsync always` и локальным Unix socket URL; billing и M1 integration tests прошли под `-race` | Временный binary не закреплён проектом; replica barrier и crash injection не запускались. |
 
 Воспроизводимый Go-вызов в текущей среде:
