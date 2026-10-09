@@ -18,10 +18,16 @@ The gateway now accepts the C2 `temperature`, `top_p`, `stop`, `seed`, `n=1` and
 
 The gateway still uses `inference.Mock` and reports synthetic word counts. Context-window enforcement, tokenizer helper, Rust node, WebSocket sessions, account authentication, Redis/Kafka, real tokens and billing are not implemented by this increment. The OpenAPI file describes the live HTTP surface and marks behavior that remains mock-only; it does not claim that the full C1–C4/C9 plan has been delivered.
 
+## M1/B1 Go domain foundation
+
+The first B1 code increment adds validated UUIDv4 and normalized username values, canonical piconero values with checked arithmetic and C5 rounding helpers, and request/attempt/lease status types under `server/internal/domain`. The gateway now uses the shared UUIDv4 generator for `X-Request-ID` and response IDs.
+
+This starts B1; it does not complete account authentication, role-specific configuration, storage interfaces, migrations or enrollment. These pure types do not satisfy or bypass B0's exit gate: its real Redis/`WAITAOF`, Kafka, tokenizer/model, proxy and wallet probes remain open as recorded in `docs/verification.md` and are still prerequisites for runtime integration. No persistent auth or financial behavior is claimed.
+
 ## Remaining B0 work
 
 1. Expand OpenAPI to all C1/C2 account, key, node, billing, usage and live-session DTOs and operations.
 2. Generate and check Go, Rust and TypeScript bindings from the schemas; expand protocol fixtures to cover every message variant and its rejection cases.
 3. Run and record the external Redis/Lua/WAITAOF, Kafka outbox, model/tokenizer parity, SOCKS5h and stagenet wallet spikes described by PLAN-back B0. This increment does not assert those integrations were available or verified.
 
-The next application milestone remains B1, followed by B2's mock-node vertical slice. Do not admit a real model until the artifact, license, runner and tokenizer parity gates pass.
+Continue B1 with validated role configuration, storage boundaries, auth and enrollment; then implement B2's node/live sockets and mock-node slice. The B0 integration evidence remains a prerequisite for completing those gates. Do not admit a real model until the artifact, license, runner and tokenizer parity gates pass.
