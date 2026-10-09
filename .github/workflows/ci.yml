@@ -27,7 +27,7 @@ jobs:
           for attempt in 1 2 3; do
             log_file="$(mktemp)"
             status=0
-            go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./... >"$log_file" 2>&1 || status=$?
+            go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./... >"$log_file" 2>&1 || status=$?
             cat "$log_file"
             if [ "$status" -eq 0 ]; then
               rm -f "$log_file"
