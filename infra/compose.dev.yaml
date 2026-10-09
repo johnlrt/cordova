@@ -10,15 +10,13 @@ services:
     healthcheck:
       test: [CMD, rpk, cluster, info, -X, brokers=redpanda:9092]
 
-  edge:
-    # The official nginx entrypoint chowns its writable tmpfs cache directories.
-    cap_add: [CHOWN]
-
   gateway:
     environment:
       CORDOVA_ENV: development
       CORDOVA_PUBLIC_ORIGIN: https://localhost:8443
 
   edge:
+    # The official nginx entrypoint chowns its writable tmpfs cache directories.
+    cap_add: [CHOWN]
     environment:
       NGINX_ENTRYPOINT_QUIET_LOGS: "1"
