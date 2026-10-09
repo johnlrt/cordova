@@ -34,7 +34,7 @@ func decodeRequest(w http.ResponseWriter, r *http.Request) (chatRequest, string,
 		if strings.HasPrefix(err.Error(), "json: unknown field") {
 			code = "unsupported_parameter"
 		}
-		return req, code, "Request does not match the documented stage-1 schema."
+		return req, code, "Request does not match the documented request schema."
 	}
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return req, "invalid_request", "Send exactly one JSON object."
@@ -60,6 +60,28 @@ func decodeRequest(w http.ResponseWriter, r *http.Request) (chatRequest, string,
 	if req.MaxTokens != nil && (*req.MaxTokens < 1 || *req.MaxTokens > 2048) {
 		return req, "invalid_request", "max_tokens must be between 1 and 2048."
 	}
+	if req.Temperature != nil && (*req.Temperature < 0 || *req.Temperature > 2) {
+		return req, "invalid_request", "temperature must be between 0 and 2."
+	}
+	if req.TopP != nil && (*req.TopP <= 0 || *req.TopP > 1) {
+		return req, "invalid_request", "top_p must be greater than 0 and no greater than 1."
+	}
+	if req.Stop != nil {
+		if len(*req.Stop) > 4 {
+			return req, "invalid_request", "stop accepts at most 4 strings."
+		}
+		for _, stop := range *req.Stop {
+			if utf8.RuneCountInString(stop) > 128 {
+				return req, "invalid_request", "stop strings must be no longer than 128 characters."
+			}
+		}
+	}
+	if req.Seed != nil && (*req.Seed < 0 || *req.Seed > 2147483647) {
+		return req, "invalid_request", "seed must be between 0 and 2147483647."
+	}
+	if req.N != nil && *req.N != 1 {
+		return req, "unsupported_parameter", "n must be 1."
+	}
 	if req.StreamOptions != nil && !req.Stream {
 		return req, "invalid_request", "stream_options requires stream=true."
 	}
@@ -76,8 +98,8 @@ func requiredTypes(body []byte) error {
 			return errors.New("required field")
 		}
 	}
-	for _, key := range []string{"max_tokens", "stream", "stream_options"} {
-		if bytes.Equal(object[key], []byte("null")) {
+	for _, key := range []string{"max_tokens", "stream", "stream_options", "temperature", "top_p", "stop", "seed", "n", "user"} {
+		if bytes.Equal(bytes.TrimSpace(object[key]), []byte("null")) {
 			return errors.New("null option")
 		}
 	}

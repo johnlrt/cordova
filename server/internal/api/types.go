@@ -1,6 +1,12 @@
 package api
 
-import "cordova/server/internal/inference"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+
+	"cordova/server/internal/inference"
+)
 
 const ModelID = "cordova-chat-small-v1"
 
@@ -10,6 +16,52 @@ type chatRequest struct {
 	MaxTokens     *int                `json:"max_tokens,omitempty"`
 	Stream        bool                `json:"stream,omitempty"`
 	StreamOptions *streamOptions      `json:"stream_options,omitempty"`
+	Temperature   *float64            `json:"temperature,omitempty"`
+	TopP          *float64            `json:"top_p,omitempty"`
+	Stop          *stopSequences      `json:"stop,omitempty"`
+	Seed          *int64              `json:"seed,omitempty"`
+	N             *int                `json:"n,omitempty"`
+	User          *string             `json:"user,omitempty"`
+}
+
+// stopSequences accepts the C2 string-or-array form while storing one
+// normalized list for the inference boundary.
+type stopSequences []string
+
+func (s *stopSequences) UnmarshalJSON(data []byte) error {
+	value := bytes.TrimSpace(data)
+	if len(value) == 0 {
+		return errors.New("stop must be a string or array of strings")
+	}
+	if value[0] == '"' {
+		var stop string
+		if err := json.Unmarshal(value, &stop); err != nil {
+			return err
+		}
+		*s = stopSequences{stop}
+		return nil
+	}
+	if value[0] != '[' {
+		return errors.New("stop must be a string or array of strings")
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(value, &entries); err != nil {
+		return err
+	}
+	stops := make(stopSequences, 0, len(entries))
+	for _, entry := range entries {
+		entry = bytes.TrimSpace(entry)
+		if len(entry) == 0 || entry[0] != '"' {
+			return errors.New("stop array entries must be strings")
+		}
+		var stop string
+		if err := json.Unmarshal(entry, &stop); err != nil {
+			return err
+		}
+		stops = append(stops, stop)
+	}
+	*s = stops
+	return nil
 }
 
 type streamOptions struct {

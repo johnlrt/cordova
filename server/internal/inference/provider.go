@@ -9,8 +9,18 @@ type Message struct {
 }
 
 type Request struct {
-	Messages  []Message
-	MaxTokens int
+	Messages   []Message
+	MaxTokens  int
+	Parameters Parameters
+}
+
+// Parameters mirrors the validated generation controls in PLAN.md C2/C3.
+// Executors may apply them once the real model path is admitted.
+type Parameters struct {
+	Temperature float64
+	TopP        float64
+	Stop        []string
+	Seed        *int64
 }
 
 type Usage struct {
@@ -25,7 +35,8 @@ type Result struct {
 }
 
 // Generate must observe cancellation and propagate emit errors. It must not log
-// or retain request content after the call. Real tokenization arrives in stage 2.
+// or retain request content after the call. Real tokenization arrives after
+// the stage-2 model and tokenizer admission checks pass.
 type Provider interface {
 	Generate(context.Context, Request, func(string) error) (Result, error)
 }
