@@ -107,7 +107,11 @@ jobs:
           make config-check
           # The generated files stay inside a mode-700 directory; make mounted test secrets readable by UID 10001.
           chmod 0644 .local/*
-          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml up --build --wait
+          if ! docker compose -f infra/compose.yaml -f infra/compose.dev.yaml up --build --wait; then
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps --all
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color --tail=100
+            exit 1
+          fi
       - name: Verify frontend auth and live usage through nginx
         working-directory: frontend
         env:
