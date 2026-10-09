@@ -23,11 +23,11 @@
 ## Что ещё не закрыто
 
 - Production tokenizer C9 and real-model parity are absent. The live M1 composition remains zero-priced and must never be used to charge real accounts.
-- Node routing still uses one process-local mock owner in the gateway. C3 challenge/JWT authentication, real reconnect-fenced sessions, Redis slot/load leases, signed catalog verification, and real-model/tokenizer parity remain unimplemented. The new tiered adapter is executable mock routing coverage, not M2 completion.
+- Node routing still uses one process-local mock owner in the gateway. Optional C3 enrollment, HMAC challenge/JWT issuance, basic `/api/node/ws` handshake, Redis-backed generation fencing, empty catalog, and heartbeat storage now exist. Inference dispatch, Redis slot/load leases, signed catalog delivery, and real-model/tokenizer parity remain unimplemented. The new tiered adapter is executable mock routing coverage, not M2 completion.
 - M1 API-key revocation now fences new local request registrations and cancels active request contexts after the key is revoked in Redis. Idempotency mappings and usage projections reconcile from ledger state at startup; live Redis execution and injected crashes around the distinct API claim, financial append, and projection boundaries are still unverified.
 - REST handlers статуса/баланса отражены в OpenAPI и fixtures, но сквозной тест через HTTP auth и Redis-backed ledger ещё не выполнен.
 - Для live suite был временно собран официальный Redis 8.10.2 с AOF и проверен `WAITAOF`; эта версия не закреплена проектом в M0, реплики не было, а crash injection на каждой write/barrier границе не выполнялся.
-- C3 session fencing и lease cleanup для реальных node sessions отсутствуют. Live Redis integration проверила ledger restart recovery и отдельное восстановление content-free usage projection, но не восстановление подключённых реальных нод.
+- C3 enrollment, one-use access tokens, basic live sessions, generation fencing, heartbeat/model-state storage and reconnect behavior now pass Redis integration tests. Server-side inference leases do not exist yet, so their cancellation/cleanup and startup recovery are still untested.
 - Отмена API-key requests проверена локальным registry-тестом; fencing late completion от реальной C3-ноды и shutdown coordination с активными Redis leases ещё отсутствуют. Reference tests подтверждают coordinator-level retry/cancel правила, но не эти runtime races.
 - `PLAN.md` ставит финальный M3 gate после M2. Реальный tokenizer/model parity, routing priorities и cross-platform node transport не прошли свои M0/M2 критерии; текущий mock не заменяет эти доказательства.
 
