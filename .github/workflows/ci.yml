@@ -22,7 +22,25 @@ jobs:
       - run: go test -race -count=1 ./...
       - run: go build ./cmd/gateway ./cmd/mock-node
       - name: Dependency vulnerability check
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            log_file="$(mktemp)"
+            status=0
+            go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./... >"$log_file" 2>&1 || status=$?
+            cat "$log_file"
+            if [ "$status" -eq 0 ]; then
+              rm -f "$log_file"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ] && grep -Eqi 'operation timed out|i/o timeout|context deadline exceeded|connection reset|network is unreachable|dial tcp|temporary failure in name resolution' "$log_file"; then
+              rm -f "$log_file"
+              sleep 5
+              continue
+            fi
+            rm -f "$log_file"
+            exit "$status"
+          done
   contracts:
     runs-on: ubuntu-latest
     steps:
