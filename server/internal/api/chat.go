@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cordova/server/internal/inference"
 )
 
-func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string) {
+func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string, principal Principal) {
+	started := time.Now()
 	req, code, message := decodeRequest(w, r)
 	if code != "" {
 		fail(w, 400, requestID, code, message)
@@ -20,6 +22,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string) 
 	}
 	if req.Model != ModelID {
 		fail(w, 404, requestID, "model_not_found", "Unknown catalog model.")
+		return
+	}
+	if len(principal.AllowedModels) > 0 && !principal.AllowedModels[req.Model] {
+		fail(w, http.StatusForbidden, requestID, "forbidden", "This API key cannot use the requested model.")
 		return
 	}
 	limit := 512
@@ -48,7 +54,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string) 
 	if !req.Stream {
 		var output strings.Builder
 		result, err := s.provider.Generate(ctx, input, func(text string) error {
-			if output.Len()+len(text) > 1<<20 {
+			if len(text) > (1<<20)-output.Len() {
 				return errors.New("response limit")
 			}
 			output.WriteString(text)
@@ -57,6 +63,16 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string) 
 		if err != nil {
 			fail(w, 503, requestID, "node_failed", "The test executor could not complete the request.")
 			return
+		}
+		if !validResult(result, limit) {
+			fail(w, 503, requestID, "node_failed", "The test executor returned invalid completion metadata.")
+			return
+		}
+		if s.usageSink != nil {
+			if err := s.usageSink(r.Context(), principal.AccountID, principal.KeyID, requestID, ModelID, result.Usage, time.Since(started)); err != nil {
+				fail(w, 503, requestID, "storage_unavailable", "Request metadata could not be persisted.")
+				return
+			}
 		}
 		writeJSON(w, 200, map[string]any{
 			"id": completionID, "object": "chat.completion", "created": created, "model": ModelID,
@@ -74,35 +90,89 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string) 
 		return
 	}
 	bytesSent := 0
-	result, err := s.provider.Generate(ctx, input, func(text string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		bytesSent += len(text)
-		if bytesSent > 1<<20 || len(text) > 16<<10 {
-			return errors.New("response limit")
-		}
-		base.Choices = []streamChoice{{Index: 0, Delta: delta{Content: text}}}
-		return event(w, base)
-	})
-	if err != nil {
-		if r.Context().Err() == nil {
-			_ = event(w, errorBody(requestID, "node_failed", "The test executor stopped before completion.", 503))
-		}
-		return
+	type generationEvent struct {
+		text   string
+		result *inference.Result
+		err    error
 	}
-	base.Choices = []streamChoice{{Index: 0, Delta: delta{}, FinishReason: &result.FinishReason}}
-	if err := event(w, base); err != nil {
-		return
-	}
-	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
-		base.Choices = []streamChoice{}
-		base.Usage = &result.Usage
-		if err := event(w, base); err != nil {
+	generated := make(chan generationEvent, 1)
+	go func() {
+		result, err := s.provider.Generate(ctx, input, func(text string) error {
+			select {
+			case generated <- generationEvent{text: text}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		select {
+		case generated <- generationEvent{result: &result, err: err}:
+		case <-ctx.Done():
+		}
+	}()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case frame := <-generated:
+			if frame.result == nil {
+				if ctx.Err() != nil {
+					continue
+				}
+				if frame.text == "" || len(frame.text) > 16<<10 || bytesSent > (1<<20)-len(frame.text) || !utf8.ValidString(frame.text) {
+					cancel()
+					_ = event(w, errorBody(requestID, "node_failed", "The test executor returned an invalid response chunk.", 503))
+					return
+				}
+				bytesSent += len(frame.text)
+				base.Choices = []streamChoice{{Index: 0, Delta: delta{Content: frame.text}}}
+				if err := event(w, base); err != nil {
+					cancel()
+					return
+				}
+				continue
+			}
+			if frame.err != nil {
+				if r.Context().Err() == nil {
+					_ = event(w, errorBody(requestID, "node_failed", "The test executor stopped before completion.", 503))
+				}
+				return
+			}
+			if !validResult(*frame.result, limit) {
+				_ = event(w, errorBody(requestID, "node_failed", "The test executor returned invalid completion metadata.", 503))
+				return
+			}
+			if s.usageSink != nil {
+				if err := s.usageSink(r.Context(), principal.AccountID, principal.KeyID, requestID, ModelID, frame.result.Usage, time.Since(started)); err != nil {
+					_ = event(w, errorBody(requestID, "storage_unavailable", "Request metadata could not be persisted.", 503))
+					return
+				}
+			}
+			base.Choices = []streamChoice{{Index: 0, Delta: delta{}, FinishReason: &frame.result.FinishReason}}
+			if err := event(w, base); err != nil {
+				return
+			}
+			if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+				base.Choices = []streamChoice{}
+				base.Usage = &frame.result.Usage
+				if err := event(w, base); err != nil {
+					return
+				}
+			}
+			_ = writeEvent(w, []byte("[DONE]"))
+			return
+		case <-heartbeat.C:
+			if err := heartbeatEvent(w); err != nil {
+				cancel()
+				return
+			}
+		case <-ctx.Done():
+			if r.Context().Err() == nil {
+				_ = event(w, errorBody(requestID, "node_failed", "The test executor stopped before completion.", 503))
+			}
 			return
 		}
 	}
-	_ = writeEvent(w, []byte("[DONE]"))
 }
 
 func event(w http.ResponseWriter, value any) error {
@@ -124,4 +194,26 @@ func writeEvent(w http.ResponseWriter, data []byte) error {
 		return err
 	}
 	return controller.Flush()
+}
+
+func heartbeatEvent(w http.ResponseWriter) error {
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	if _, err := fmt.Fprint(w, ": keep-alive\n\n"); err != nil {
+		return err
+	}
+	return controller.Flush()
+}
+
+func validResult(result inference.Result, maxTokens int) bool {
+	usage := result.Usage
+	if result.FinishReason != "stop" && result.FinishReason != "length" {
+		return false
+	}
+	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.CompletionTokens > maxTokens || usage.PromptTokens > int(^uint(0)>>1)-usage.CompletionTokens {
+		return false
+	}
+	return usage.TotalTokens == usage.PromptTokens+usage.CompletionTokens
 }

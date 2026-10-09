@@ -1,33 +1,47 @@
-# Stage 2 — contract-first server foundation
+# M1 — mock-node vertical slice
 
-Date: 2026-10-09. This is the first backend increment after the stage-1 mock API. It starts PLAN-back B0 by publishing contracts for the current HTTP surface, the planned node/dashboard WebSockets, and the private tokenizer boundary.
+This change adds a local development path for the first dashboard-backed request flow:
 
-## Contract foundation increment
+```text
+Browser → TLS nginx edge → Go gateway → WSS synthetic node
+                              ↓                 ↓
+                         Redis outbox → Kafka → account usage projection
+```
 
-- `contracts/openapi.yaml` describes the implemented `/healthz`, `/v1/models` and `/v1/chat/completions` routes, including the accepted C2 generation controls and synthetic mock usage.
-- `contracts/ws/v1.schema.json` records all 27 node and 8 dashboard live message variants from C3/C4, direction groups, frame bounds, and the initial-session ID rule. The check gate verifies the registries and representative valid and invalid frames.
-- `contracts/internal/tokenizer.schema.json` records the C9 request/response shapes, safe failures, helper-only auth boundary and operational limits.
-- `contracts/fixtures/` contains accepted and rejected examples. Run `sh scripts/contracts-check.sh` to check JSON syntax, local references, route/message inventory and the supported schema subset against those fixtures.
-- The contract checker uses only Python's standard library. `openapi.yaml` is JSON-formatted YAML so this first gate can parse it without adding a YAML dependency.
+The frontend displays only completed metadata. Prompts and generated text do not enter Redis or Kafka. Usage counts are synthetic word counts and charges remain zero. Real llama.cpp inference, node enrollment/routing, authoritative tokenization, billing, deposits, and payouts remain disabled.
 
-## Go request increment
+## Included behavior
 
-The gateway now accepts the C2 `temperature`, `top_p`, `stop`, `seed`, `n=1` and `user` fields. It validates their ranges and types, normalizes scalar `stop` into a list, applies the documented sampling defaults, and passes generation controls through `inference.Provider`. The demo `inference.Mock` still emits fixed synthetic text and word counts; it does not apply sampling, stop sequences, or model tokenization. The `user` field is discarded and is not sent to the provider.
+- Account registration, login, recovery-code rotation, revocable Redis sessions, CSRF checks, auth throttles, and Argon2id password hashes.
+- API-key creation with a one-time secret, HMAC verifier indexing, owner-only listing, revocation, scope checks, and a 20-key account cap.
+- OpenAI-style model listing and SSE chat through a private TLS WebSocket synthetic node. The gateway recounts mock usage locally and stores metadata only.
+- Redis Streams outbox to Kafka with account partitioning and idempotent metadata projection. Dashboard usage is fetched from the projection; C4 live WebSocket invalidations use a short-lived, one-use, session-bound ticket and contain no content.
+- Svelte dashboard, login, recovery and API-guide pages. It refreshes usage after a live invalidation and polls every 30 seconds as a fallback.
+- Local nginx TLS, SSE and WebSocket proxying, strict TLS versions, browser security headers, denied public readiness/metrics/payment routes, private Redis/Kafka/node networks, and generated local secrets/certificates.
+- OpenAPI account/key/usage routes and C3/C4 registries checked in CI without Docker or service credentials.
 
-## Runtime status
+The local mock-node WSS framing is an M1-only synthetic adapter. It is not yet the full C3 Rust-node session, signed-token, lease, and token-ID protocol. The Rust CLI and llama.cpp subprocess live in `node/`, but are not connected to this M1 gateway. This is an explicit remaining B2 integration gap; do not describe the current slice as real inference or as a qualified Rust-node connection.
 
-The gateway still uses `inference.Mock` and reports synthetic word counts. Context-window enforcement, tokenizer helper, Rust node, WebSocket sessions, account authentication, Redis/Kafka, real tokens and billing are not implemented by this increment. The OpenAPI file describes the live HTTP surface and marks behavior that remains mock-only; it does not claim that the full C1–C4/C9 plan has been delivered.
+## Start the local stack
 
-## M1/B1 Go domain foundation
+From the repository root:
 
-The first B1 code increment adds validated UUIDv4 and normalized username values, canonical piconero values with checked arithmetic and C5 rounding helpers, and request/attempt/lease status types under `server/internal/domain`. The gateway now uses the shared UUIDv4 generator for `X-Request-ID` and response IDs.
+```sh
+make bootstrap-dev
+make config-check
+make up
+make smoke
+make network-check
+make test-edge
+```
 
-This starts B1; it does not complete account authentication, role-specific configuration, storage interfaces, migrations or enrollment. These pure types do not satisfy or bypass B0's exit gate: its real Redis/`WAITAOF`, Kafka, tokenizer/model, proxy and wallet probes remain open as recorded in `docs/verification.md` and are still prerequisites for runtime integration. No persistent auth or financial behavior is claimed.
+`make config-check` validates Compose service/image/network boundaries, secret file permissions, certificate chains and hostnames. `make smoke` registers a disposable local account, creates a test key, checks models and SSE completion, then waits for the same usage record in the dashboard projection. `make test-edge` checks TLS headers, deep-link refresh, private-route denial, C4 upgrade, one-use ticket and application heartbeat. Neither smoke script prints account secrets.
 
-## Remaining B0 work
+`make down` stops services and keeps named data volumes. The stack is for local development only. Container tags use explicit versions, but they are not immutable registry digests; digest and image-signing qualification remain open release work.
 
-1. Expand OpenAPI to all C1/C2 account, key, node, billing, usage and live-session DTOs and operations.
-2. Generate and check Go, Rust and TypeScript bindings from the schemas; expand protocol fixtures to cover every message variant and its rejection cases.
-3. Run and record the external Redis/Lua/WAITAOF, Kafka outbox, model/tokenizer parity, SOCKS5h and stagenet wallet spikes described by PLAN-back B0. This increment does not assert those integrations were available or verified.
+## Checks and limits
 
-Continue B1 with validated role configuration, storage boundaries, auth and enrollment; then implement B2's node/live sockets and mock-node slice. The B0 integration evidence remains a prerequisite for completing those gates. Do not admit a real model until the artifact, license, runner and tokenizer parity gates pass.
+- `make contracts-check` validates REST route inventory, C3/C4 type registries, tokenizer contracts and positive/negative fixtures.
+- CI runs Go formatting, vet, race tests, builds both Go commands, tests and lints the Rust node, checks frontend types/tests/build and all contracts, and audits Go/Rust/npm dependencies.
+- `make smoke`, `make network-check`, and `make test-edge` require the Compose stack and have not been run unless their output is recorded for this checkout.
+- M0 Redis/Lua/WAITAOF, Kafka duplication/recovery, tokenizer/model parity, SOCKS5h, and wallet probes remain prerequisites for later milestones. No production secret, model artifact, wallet RPC, or public port is configured by the local stack.

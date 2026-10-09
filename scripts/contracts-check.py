@@ -198,16 +198,28 @@ def main() -> int:
         tokenizer = load_json(CONTRACTS / "internal/tokenizer.schema.json")
         if openapi.get("openapi") != "3.1.0":
             raise ContractError("openapi.yaml: expected OpenAPI 3.1.0")
-        expected_paths = {"/healthz", "/v1/models", "/v1/chat/completions"}
-        if set(openapi.get("paths", {})) != expected_paths:
-            raise ContractError("openapi.yaml: path inventory does not match the initial stage-1 API")
-        m1_schemas = {
-            "AccountErrorResponse", "AccountSafeErrorFixtures", "Account", "SessionView", "LiveTicket",
-            "RegistrationResult", "UsageRow", "UsagePage", "ApiKey", "Hardware", "NodeModel", "Node", "Balance",
+        expected_paths = {
+            "/healthz", "/v1/models", "/v1/chat/completions",
+            "/api/auth/register", "/api/auth/login", "/api/auth/recover", "/api/auth/logout",
+            "/api/session", "/api/keys", "/api/keys/{id}", "/api/usage",
+            "/api/live-ticket", "/api/live",
         }
+        if set(openapi.get("paths", {})) != expected_paths:
+            raise ContractError("openapi.yaml: route inventory differs from the implemented Stage 1 and M1 API")
         schemas = openapi.get("components", {}).get("schemas", {})
-        if not m1_schemas.issubset(schemas):
-            raise ContractError(f"openapi.yaml: missing M1 frontend DTO schemas {sorted(m1_schemas - set(schemas))}")
+        required_m1_schemas = {
+            "Account", "RegisterRequest", "LoginRequest", "RecoverRequest", "SessionResponse",
+            "APIKeyCreateRequest", "APIKeyCreateResponse", "APIKey", "APIKeyList", "UsageRow",
+            "UsageList", "LiveTicketResponse",
+        }
+        if not required_m1_schemas.issubset(schemas):
+            raise ContractError("openapi.yaml: M1 account, key, usage or live-ticket schemas are incomplete")
+        frontend_m1_schemas = {
+            "AccountErrorResponse", "AccountSafeErrorFixtures", "SessionView", "LiveTicket",
+            "RegistrationResult", "UsagePage", "ApiKey", "Hardware", "NodeModel", "Node", "Balance",
+        }
+        if not frontend_m1_schemas.issubset(schemas):
+            raise ContractError(f"openapi.yaml: missing M1 frontend DTO schemas {sorted(frontend_m1_schemas - set(schemas))}")
         expected_safe_codes = {
             "invalid_request", "unsupported_parameter", "unauthenticated", "forbidden", "csrf_failed", "not_found",
             "conflict", "insufficient_funds", "spend_cap_exceeded", "rate_limited", "model_not_found", "model_warming",
@@ -221,6 +233,11 @@ def main() -> int:
         fixture_codes = [item["error"]["code"] for item in error_fixtures]
         if set(fixture_codes) != expected_safe_codes or len(fixture_codes) != len(expected_safe_codes):
             raise ContractError("account-safe-errors.json: must cover every C2 safe error code exactly once")
+        live_security = openapi["paths"]["/api/live"]["get"].get("security", [])
+        if not any("SessionCookie" in requirement for requirement in live_security):
+            raise ContractError("openapi.yaml: dashboard live socket must use a session cookie")
+        if "/readyz" in openapi["paths"] or "/metrics" in openapi["paths"]:
+            raise ContractError("openapi.yaml: private readiness/metrics endpoints must not be public API routes")
         for path, item in openapi["paths"].items():
             for method, operation in item.items():
                 if method.lower() not in {"get", "post", "put", "patch", "delete"}:

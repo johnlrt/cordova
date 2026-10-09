@@ -16,10 +16,10 @@ function session(account: typeof accountA) {
   return { account, csrf_token: csrf, expires_at: '2026-10-10T10:00:00Z' };
 }
 
-function usage(requestId: string, modelId: string) {
+function usage(requestId: string) {
   return {
     data: [{
-      request_id: requestId, model_id: modelId, status: 'settled', input_tokens: 4, output_tokens: 5,
+      request_id: requestId, api_key_id: 'c9eb01e9-899f-4edb-87fd-66e585ec9f80', model_id: 'cordova-chat-small-v1', status: 'completed', input_tokens: 4, output_tokens: 5,
       charged_piconero: '0', latency_ms: 18, created_at: '2026-10-09T10:00:00Z', finished_at: '2026-10-09T10:00:01Z'
     }],
     next_cursor: null
@@ -28,7 +28,7 @@ function usage(requestId: string, modelId: string) {
 
 async function mockApi(page: Page) {
   let current: ReturnType<typeof session> | null = null;
-  let usageForAccount = usage(requestA, 'alpha-model');
+  let usageForAccount = usage(requestA);
   let socketCloses = 0;
   let liveSocket: WebSocketRoute | undefined;
   let liveAccountId = '';
@@ -55,13 +55,13 @@ async function mockApi(page: Page) {
     const path = new URL(request.url()).pathname;
     if (path === '/api/auth/register') {
       current = session(accountA);
-      usageForAccount = usage(requestA, 'alpha-model');
+      usageForAccount = usage(requestA);
       await route.fulfill({ status: 201, json: { ...current, recovery_codes: ['synthetic-recovery-1', 'synthetic-recovery-2'] } });
     } else if (path === '/api/auth/login') {
       const body = request.postDataJSON() as { username?: string };
       const account = body.username === accountB.username ? accountB : accountA;
       current = session(account);
-      usageForAccount = account === accountA ? usage(requestA, 'alpha-model') : usage(requestB, 'beta-model');
+      usageForAccount = account === accountA ? usage(requestA) : usage(requestB);
       await route.fulfill({ status: 200, json: current });
     } else if (path === '/api/auth/recover') {
       current = session(accountA);
@@ -142,7 +142,6 @@ test('[auth] registration reveals recovery codes once and then loads account usa
   await page.getByLabel('I saved my recovery codes somewhere safe').check();
   await page.getByRole('button', { name: 'Continue to dashboard' }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
-  await expect(page.getByText('alpha-model')).toBeVisible();
   await expect(page.getByText(`#${requestA.slice(0, 8)}`)).toBeVisible();
   expect(await page.locator('body').innerText()).not.toContain('synthetic-password-long-enough');
 });
@@ -166,7 +165,6 @@ test('[auth] logout clears account content and a following account sees only its
   await expect(page.getByRole('heading', { name: 'Sign in to Cordova' })).toBeVisible();
   await fillCredentials(page, accountA.username);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByText('alpha-model')).toBeVisible();
   await expect(page.getByText('Live updates connected')).toBeVisible();
 
   await page.getByRole('button', { name: 'Sign out' }).click();
@@ -175,9 +173,7 @@ test('[auth] logout clears account content and a following account sees only its
 
   await fillCredentials(page, accountB.username);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByText('beta-model')).toBeVisible();
   await expect(page.getByText(`#${requestB.slice(0, 8)}`)).toBeVisible();
-  await expect(page.getByText('alpha-model')).toHaveCount(0);
   await expect(page.getByText(`#${requestA.slice(0, 8)}`)).toHaveCount(0);
 });
 
@@ -192,7 +188,6 @@ test('[auth] recovery confirms the post-recovery payout cooldown before opening 
   await page.getByRole('button', { name: 'Recover account' }).click();
   await expect(page.getByRole('status')).toContainText('Payouts are locked for 24 hours');
   await page.getByRole('link', { name: 'Continue to dashboard' }).click();
-  await expect(page.getByText('alpha-model')).toBeVisible();
 });
 
 test('[live] invalidation refreshes usage only after the authoritative REST response', async ({ page }) => {
@@ -201,15 +196,15 @@ test('[live] invalidation refreshes usage only after the authoritative REST resp
   await page.waitForLoadState('networkidle');
   await fillCredentials(page, accountA.username);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByText('alpha-model', { exact: true })).toBeVisible();
+  await expect(page.getByText('cordova-chat-small-v1', { exact: true })).toBeVisible();
   await expect(page.getByText('Live updates connected')).toBeVisible();
 
-  const held = api.holdNextUsage(usage(requestA, 'alpha-model-confirmed'));
+  const held = api.holdNextUsage(usage(requestB));
   api.publishUsageInvalidation();
   await held.started;
-  await expect(page.getByText('alpha-model', { exact: true })).toBeVisible();
-  await expect(page.getByText('alpha-model-confirmed', { exact: true })).toHaveCount(0);
+  await expect(page.getByText(`#${requestA.slice(0, 8)}`)).toBeVisible();
+  await expect(page.getByText(`#${requestB.slice(0, 8)}`)).toHaveCount(0);
   held.release();
-  await expect(page.getByText('alpha-model-confirmed', { exact: true })).toBeVisible();
-  await expect(page.getByText('alpha-model', { exact: true })).toHaveCount(0);
+  await expect(page.getByText(`#${requestB.slice(0, 8)}`)).toBeVisible();
+  await expect(page.getByText(`#${requestA.slice(0, 8)}`)).toHaveCount(0);
 });
