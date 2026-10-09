@@ -168,6 +168,65 @@ func TestRedisJournalIntegrationRetryRecoveryAndPrecision(t *testing.T) {
 	}
 }
 
+func TestRedisLedgerZeroPricedTransitionsUseCanonicalZero(t *testing.T) {
+	client := integrationRedisClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	journal := integrationJournal(t, client)
+	ledger, err := NewRedisLedger(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Recover(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	zero, _ := domain.NewPiconero(0)
+	version, err := domain.ParseID(testID(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	price := Price{Version: version, InputRate: zero, OutputRate: zero}
+	account, key, owner := testID(t), testID(t), testID(t)
+	capAmount := zero
+	now := time.Now().UTC()
+	reserve := func() (string, string) {
+		requestID, attemptID := testID(t), testID(t)
+		_, _, reserveErr := ledger.Reserve(ctx, ReserveParams{RequestID: requestID, AttemptID: attemptID, ModelID: defaultModelID,
+			AccountID: account, APIKeyID: key, OwnerID: owner, InputTokens: 1, MaxOutputTokens: 2,
+			DailySpendCap: capAmount, Price: price, AcceptedAt: now})
+		if reserveErr != nil {
+			t.Fatal(reserveErr)
+		}
+		return requestID, attemptID
+	}
+
+	settleRequest, settleAttempt := reserve()
+	if _, err := ledger.Settle(ctx, settleRequest, settleAttempt, 1, false, now.Add(time.Second)); err != nil {
+		t.Fatalf("settle of zero-priced request failed: %v", err)
+	}
+
+	refundRequest, refundAttempt := reserve()
+	if _, err := ledger.FailAttempt(ctx, refundRequest, refundAttempt, false, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("refund of zero-priced request failed: %v", err)
+	}
+
+	orphanRequest, _ := reserve()
+	if recovered, err := ledger.Recover(ctx, now.Add(time.Minute)); err != nil || recovered != 1 {
+		t.Fatalf("orphan zero-priced request recovery count=%d err=%v", recovered, err)
+	}
+	for _, requestID := range []string{settleRequest, refundRequest, orphanRequest} {
+		checkpoint, _, err := ledger.Request(ctx, requestID)
+		if err != nil || checkpoint.Status == RequestRunning {
+			t.Fatalf("request %s remains unsettled: status=%s err=%v", requestID, checkpoint.Status, err)
+		}
+	}
+	balance, err := ledger.Balance(ctx, account)
+	if err != nil || balance.Available.Int64() != 0 || balance.Reserved.Int64() != 0 {
+		t.Fatalf("zero-priced balance=%+v err=%v", balance, err)
+	}
+}
+
 func TestRedisJournalIntegrationRejectsWrongKeyTypeBeforeMutation(t *testing.T) {
 	client := integrationRedisClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

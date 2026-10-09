@@ -135,7 +135,7 @@ func (l *RedisLedger) FailAttempt(ctx context.Context, requestID, attemptID stri
 			posting(BucketReserved, request.AccountID, amount.Int64()), posting(BucketAvailable, request.AccountID, -amount.Int64()),
 		}}
 	cap := CapAdjustment{Key: request.AccountID + ":" + request.APIKeyID + ":" + request.AcceptedDay,
-		Limit: request.DailySpendCap.String(), SpentDelta: "0", ReservedDelta: "-" + amount.String()}
+		Limit: request.DailySpendCap.String(), SpentDelta: "0", ReservedDelta: negativeAmount(amount)}
 	return l.journal.AppendRequest(ctx, entry, requestID, revision, request, cap)
 }
 
@@ -231,7 +231,7 @@ func (l *RedisLedger) Settle(ctx context.Context, requestID, attemptID string, o
 			posting(BucketOwnerPending, attempt.Reservation.OwnerID, -quote.OwnerCredit.Int64()), posting(BucketEquity, "", -quote.PlatformTake.Int64()),
 		}}
 	cap := CapAdjustment{Key: request.AccountID + ":" + request.APIKeyID + ":" + request.AcceptedDay,
-		Limit: request.DailySpendCap.String(), SpentDelta: quote.ActualCost.String(), ReservedDelta: "-" + reservation.String()}
+		Limit: request.DailySpendCap.String(), SpentDelta: quote.ActualCost.String(), ReservedDelta: negativeAmount(reservation)}
 	return l.journal.AppendRequest(ctx, entry, requestID, revision, request, cap)
 }
 
