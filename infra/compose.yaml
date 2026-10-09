@@ -161,10 +161,9 @@ services:
         condition: service_healthy
     networks: [front]
     read_only: true
-    tmpfs:
-      - /var/cache/nginx:rw,noexec,nosuid,size=64m,uid=101,gid=101,mode=0755
-      - /var/run:rw,noexec,nosuid,size=1m,mode=0755
+    tmpfs: [/var/cache/nginx, /var/run]
     cap_drop: [ALL]
+    cap_add: [CHOWN]
     security_opt: [no-new-privileges:true]
     pids_limit: 128
     mem_limit: 128m
