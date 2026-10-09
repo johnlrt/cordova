@@ -50,7 +50,9 @@ func TestFrontendPreservesAPIAndRestrictsFiles(t *testing.T) {
 	}
 	for _, route := range []string{"/api/session", "/api/auth/login"} {
 		method := "GET"
-		if route == "/api/auth/login" { method = "POST" }
+		if route == "/api/auth/login" {
+			method = "POST"
+		}
 		w := call(h, method, route, "{}", "")
 		if w.Header().Get("X-Request-ID") == "" || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("frontend wrapper did not pass %s through to the API", route)
