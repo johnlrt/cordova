@@ -1,0 +1,17 @@
+.claude/
+.codex/
+.DS_Store
+.old/
+.local/
+.env
+.env.*
+!.env.example
+bin/
+dist/
+node_modules/
+.svelte-kit/
+target/
+*.gguf
+*.log
+coverage.out
+secrets/
