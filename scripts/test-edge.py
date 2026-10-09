@@ -95,7 +95,7 @@ def main() -> int:
                 raise RuntimeError("TLS edge security headers are incomplete")
         with request("/dashboard") as response:
             dashboard = response.read()
-            if response.status != 200 or b"Recent usage" not in dashboard:
+            if response.status != 200 or b"Checking your account session" not in dashboard:
                 raise RuntimeError("dashboard deep-link refresh failed")
             if not has_hash_script_csp(dashboard):
                 raise RuntimeError("prerendered page is missing its hash-based script CSP")
@@ -111,7 +111,7 @@ def main() -> int:
 
         username = "edge-" + uuid.uuid4().hex[:16]
         password = "Cordova-edge-" + uuid.uuid4().hex
-        with request("/api/auth/register", {"username": username, "password": password, "privacy_notice_version": "v1"}) as response:
+        with request("/api/auth/register", {"username": username, "password": password, "privacy_notice_version": "privacy-v1"}) as response:
             auth = json.load(response)
         csrf = auth["csrf_token"]
         with request("/api/live-ticket", {}, {"X-CSRF-Token": csrf}) as response:
