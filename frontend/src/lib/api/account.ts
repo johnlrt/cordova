@@ -1,82 +1,23 @@
 import { ApiFailure } from './client.ts';
-
-export interface Account {
-  id: string;
-  username: string;
-  created_at: string;
-  totp_enabled: boolean;
-  privacy_notice_version: string;
-}
-
-export interface SessionView {
-  account: Account;
-  csrf_token: string;
-  expires_at: string;
-}
-
-export interface RegistrationResult extends SessionView {
-  recovery_codes: string[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-function hasExactKeys(value: Record<string, unknown>, keys: string[]) {
-  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-
-function isUuid(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
-
-function isTimestamp(value: unknown): value is string {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
-}
-
+import { matchesOpenApi } from './generated/contracts.ts';
+import type { AccountErrorResponse, LiveTicket, RegistrationResult, SessionView } from './generated/contracts.ts';
+export type { Account, RegistrationResult, SessionView } from './generated/contracts.ts';
 export function decodeSession(value: unknown): SessionView {
-  if (!isRecord(value) || !hasExactKeys(value, ['account', 'csrf_token', 'expires_at']) || !isRecord(value.account) ||
-      !hasExactKeys(value.account, ['id', 'username', 'created_at', 'totp_enabled', 'privacy_notice_version'])) throw new ApiFailure('invalid_response');
-  const account = value.account;
-  if (!isUuid(account.id) || typeof account.username !== 'string' || account.username.length < 3 || account.username.length > 64 ||
-      !isTimestamp(account.created_at) || typeof account.totp_enabled !== 'boolean' ||
-      typeof account.privacy_notice_version !== 'string' || !account.privacy_notice_version ||
-      typeof value.csrf_token !== 'string' || value.csrf_token.length < 16 || value.csrf_token.length > 512 ||
-      !isTimestamp(value.expires_at)) throw new ApiFailure('invalid_response');
-  return {
-    account: {
-      id: account.id, username: account.username, created_at: account.created_at,
-      totp_enabled: account.totp_enabled, privacy_notice_version: account.privacy_notice_version
-    },
-    csrf_token: value.csrf_token,
-    expires_at: value.expires_at
-  };
+  if (!matchesOpenApi(value, 'SessionView')) throw new ApiFailure('invalid_response');
+  return value as SessionView;
 }
 
 export function decodeRegistration(value: unknown): RegistrationResult {
-  if (!isRecord(value) || !hasExactKeys(value, ['account', 'csrf_token', 'expires_at', 'recovery_codes']) ||
-      !Array.isArray(value.recovery_codes) || value.recovery_codes.length < 1 || value.recovery_codes.length > 32 ||
-      !value.recovery_codes.every((code) => typeof code === 'string' && code.length >= 8 && code.length <= 128)) {
-    throw new ApiFailure('invalid_response');
-  }
-  const codes = value.recovery_codes as string[];
-  if (new Set(codes).size !== codes.length) throw new ApiFailure('invalid_response');
-  const session = decodeSession({ account: value.account, csrf_token: value.csrf_token, expires_at: value.expires_at });
-  return { ...session, recovery_codes: [...codes] };
+  if (!matchesOpenApi(value, 'RegistrationResult')) throw new ApiFailure('invalid_response');
+  return value as RegistrationResult;
 }
 
 function decodeError(response: Response, value: unknown): ApiFailure {
-  const envelope = isRecord(value) && isRecord(value.error) ? value.error : null;
-  const validTypes = ['invalid_request_error', 'authentication_error', 'permission_error', 'rate_limit_error', 'server_error'];
-  if (!isRecord(value) || Object.keys(value).length !== 2 || !Object.hasOwn(value, 'error') || !Object.hasOwn(value, 'request_id') ||
-      !isUuid(value.request_id) ||
-      !envelope || Object.keys(envelope).length !== 4 || !['message', 'type', 'param', 'code'].every((key) => Object.hasOwn(envelope, key)) ||
-      typeof envelope.message !== 'string' || envelope.message.length > 512 || !validTypes.includes(String(envelope.type)) ||
-      !(envelope.param === null || (typeof envelope.param === 'string' && envelope.param.length <= 128)) ||
-      typeof envelope.code !== 'string' || !/^[a-z_]{1,64}$/.test(envelope.code)) {
-    return new ApiFailure('invalid_response', response.status);
-  }
-  const code = envelope.code;
-  const requestId = value.request_id;
+  if (!matchesOpenApi(value, 'AccountErrorResponse')) return new ApiFailure('invalid_response', response.status);
+  const envelope = value as AccountErrorResponse;
+  const error = envelope.error;
+  const code = error.code;
+  const requestId = envelope.request_id;
   const retrySeconds = Number(response.headers.get('Retry-After'));
   return new ApiFailure(code, response.status, requestId,
     Number.isInteger(retrySeconds) && retrySeconds >= 0 && retrySeconds <= 3600 ? retrySeconds : null);
@@ -149,8 +90,8 @@ export async function logoutAccount(csrfToken: string, signal?: AbortSignal): Pr
 
 export async function fetchLiveTicket(csrfToken: string, signal?: AbortSignal): Promise<string> {
   const value = await accountRequest('/api/live-ticket', { method: 'POST', body: {}, csrfToken, signal, expectedStatus: 200 });
-  if (!isRecord(value) || !hasExactKeys(value, ['ticket', 'expires_at']) || typeof value.ticket !== 'string' || value.ticket.length < 32 || value.ticket.length > 512 ||
-      !isTimestamp(value.expires_at) || Date.parse(value.expires_at) <= Date.now() ||
-      Date.parse(value.expires_at) > Date.now() + 35_000) throw new ApiFailure('invalid_response');
-  return value.ticket;
+  if (!matchesOpenApi(value, 'LiveTicket')) throw new ApiFailure('invalid_response');
+  const ticket = value as LiveTicket;
+  if (Date.parse(ticket.expires_at) <= Date.now() || Date.parse(ticket.expires_at) > Date.now() + 35_000) throw new ApiFailure('invalid_response');
+  return ticket.ticket;
 }

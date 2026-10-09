@@ -9,6 +9,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "contracts:generate": "node scripts/generate-contracts.mjs",
+    "contracts:check": "node scripts/generate-contracts.mjs --check",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "node --experimental-strip-types --test tests/*.test.ts"
   },

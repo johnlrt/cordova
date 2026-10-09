@@ -201,6 +201,26 @@ def main() -> int:
         expected_paths = {"/healthz", "/v1/models", "/v1/chat/completions"}
         if set(openapi.get("paths", {})) != expected_paths:
             raise ContractError("openapi.yaml: path inventory does not match the initial stage-1 API")
+        m1_schemas = {
+            "AccountErrorResponse", "AccountSafeErrorFixtures", "Account", "SessionView", "LiveTicket",
+            "RegistrationResult", "UsageRow", "UsagePage", "ApiKey", "Hardware", "NodeModel", "Node", "Balance",
+        }
+        schemas = openapi.get("components", {}).get("schemas", {})
+        if not m1_schemas.issubset(schemas):
+            raise ContractError(f"openapi.yaml: missing M1 frontend DTO schemas {sorted(m1_schemas - set(schemas))}")
+        expected_safe_codes = {
+            "invalid_request", "unsupported_parameter", "unauthenticated", "forbidden", "csrf_failed", "not_found",
+            "conflict", "insufficient_funds", "spend_cap_exceeded", "rate_limited", "model_not_found", "model_warming",
+            "no_capacity", "node_failed", "timeout", "storage_unavailable", "tokenizer_unavailable", "wallet_unavailable",
+            "replay_unavailable", "verification_required", "enrollment_pending",
+        }
+        safe_error_codes = set(schemas["AccountErrorResponse"]["properties"]["error"]["properties"]["code"]["enum"])
+        if safe_error_codes != expected_safe_codes:
+            raise ContractError("openapi.yaml: browser safe-error registry differs from PLAN.md C2")
+        error_fixtures = load_json(CONTRACTS / "fixtures/rest/account-safe-errors.json")
+        fixture_codes = [item["error"]["code"] for item in error_fixtures]
+        if set(fixture_codes) != expected_safe_codes or len(fixture_codes) != len(expected_safe_codes):
+            raise ContractError("account-safe-errors.json: must cover every C2 safe error code exactly once")
         for path, item in openapi["paths"].items():
             for method, operation in item.items():
                 if method.lower() not in {"get", "post", "put", "patch", "delete"}:
