@@ -132,8 +132,8 @@ def main() -> int:
 
         with request("/dashboard") as response:
             page = response.read()
-        if b"Recent requests" not in page or sentinel.encode() in page:
-            raise RuntimeError("dashboard deep link is missing or contains prompt data")
+        if b"Checking your account session" not in page or sentinel.encode() in page:
+            raise RuntimeError("dashboard deep link is missing its session bootstrap or contains prompt data")
         print("PASS: TLS registration, API-key catalog, flushed SSE [DONE], Kafka usage projection and dashboard test-credit view")
         return 0
     except (OSError, KeyError, ValueError, urllib.error.URLError, RuntimeError) as error:
