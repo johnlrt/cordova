@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -364,6 +366,171 @@ func TestRedisJournalIntegrationFaultInjectedCrashBoundaries(t *testing.T) {
 	if err := ledger.journal.Verify(ctx); err != nil {
 		t.Fatalf("fault-boundary journal replay failed: %v", err)
 	}
+}
+
+// TestRedisJournalIntegrationRedisProcessRestartAfterAppend owns the Redis
+// process it terminates. It verifies AOF replay and ledger recovery after the
+// server disappears after the atomic append response but before WAITAOF.
+func TestRedisJournalIntegrationRedisProcessRestartAfterAppend(t *testing.T) {
+	binary := strings.TrimSpace(os.Getenv("CORDOVA_TEST_REDIS_SERVER"))
+	if binary == "" {
+		t.Skip("set CORDOVA_TEST_REDIS_SERVER to an isolated redis-server binary")
+	}
+	if info, err := os.Stat(binary); err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
+		t.Fatalf("CORDOVA_TEST_REDIS_SERVER is not an executable file: %q", binary)
+	}
+
+	dataDir := t.TempDir()
+	socketID := testID(t)
+	socket := filepath.Join("/tmp", "cv-redis-"+strings.ReplaceAll(socketID[:8], "-", "")+".sock")
+	process := startCrashTestRedis(t, binary, dataDir, socket)
+	client := crashTestRedisClient(t, socket)
+	journal := integrationJournal(t, client)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ledger, err := NewRedisLedger(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Recover(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	accountID, keyID, ownerID := testID(t), testID(t), testID(t)
+	creditAmount, _ := domain.NewPiconero(10_000_000)
+	if _, err := ledger.CreditTest(ctx, accountID, "redis-process-crash-credit", creditAmount, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	requestID, attemptID := testID(t), testID(t)
+	price := testPrice(t, 1_000_000, 1_000_000, 5_000)
+	capAmount, _ := domain.NewPiconero(10_000_000)
+	params := ReserveParams{RequestID: requestID, AttemptID: attemptID, ModelID: defaultModelID, AccountID: accountID,
+		APIKeyID: keyID, OwnerID: ownerID, InputTokens: 1, MaxOutputTokens: 2, DailySpendCap: capAmount,
+		Price: price, AcceptedAt: time.Now().UTC()}
+
+	journal.faultInjector = func(stage redisJournalFaultStage, operationID string) error {
+		if stage != redisFaultAfterAtomicAppend || operationID != "reserve:"+requestID+":"+attemptID {
+			return nil
+		}
+		return errors.Join(errors.New("simulated server loss before WAITAOF"), process.kill())
+	}
+	if _, _, err := ledger.Reserve(ctx, params); !errors.Is(err, ErrJournalUncertain) {
+		t.Fatalf("reserve after Redis process loss error=%v", err)
+	}
+	journal.faultInjector = nil
+	if err := process.wait(); err != nil && !strings.Contains(err.Error(), "signal: killed") {
+		t.Fatalf("Redis process exit=%v", err)
+	}
+
+	restarted := startCrashTestRedis(t, binary, dataDir, socket)
+	newClient := crashTestRedisClient(t, socket)
+	newJournal, err := NewRedisJournal(newClient, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newJournal.stream, newJournal.outbox, newJournal.headKey = journal.stream, journal.outbox, journal.headKey
+	newJournal.balancesKey, newJournal.operationsKey, newJournal.requestsKey = journal.balancesKey, journal.operationsKey, journal.requestsKey
+	newJournal.capsKey, newJournal.barrierKey, newJournal.usagePendingKey = journal.capsKey, journal.barrierKey, journal.usagePendingKey
+	newLedger, err := NewRedisLedger(newJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := newLedger.Recover(ctx, time.Now().UTC().Add(time.Second)); err != nil || recovered != 1 {
+		t.Fatalf("post-restart recovered=%d err=%v", recovered, err)
+	}
+	checkpoint, _, err := newLedger.Request(ctx, requestID)
+	if err != nil || checkpoint.Status != RequestRefunded {
+		t.Fatalf("post-restart request status=%s err=%v", checkpoint.Status, err)
+	}
+	balance, err := newLedger.Balance(ctx, accountID)
+	if err != nil || balance.Available.Int64() != creditAmount.Int64() || balance.Reserved.Int64() != 0 {
+		t.Fatalf("post-restart balance=%+v err=%v", balance, err)
+	}
+	if err := newJournal.Verify(ctx); err != nil {
+		t.Fatalf("post-restart journal verification: %v", err)
+	}
+	if err := restarted.kill(); err != nil && !strings.Contains(err.Error(), "already finished") {
+		t.Fatalf("stop restarted Redis: %v", err)
+	}
+}
+
+type crashTestRedisProcess struct {
+	cmd      *exec.Cmd
+	done     chan struct{}
+	waitErr  error
+	killOnce sync.Once
+}
+
+func startCrashTestRedis(t *testing.T, binary, dataDir, socket string) *crashTestRedisProcess {
+	t.Helper()
+	cmd := exec.Command(binary, "--port", "0", "--unixsocket", socket, "--unixsocketperm", "700",
+		"--dir", dataDir, "--appendonly", "yes", "--appendfsync", "always", "--save", "",
+		"--daemonize", "no", "--logfile", filepath.Join(dataDir, "redis.log"))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start isolated Redis: %v", err)
+	}
+	process := &crashTestRedisProcess{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		process.waitErr = cmd.Wait()
+		close(process.done)
+	}()
+	t.Cleanup(func() {
+		_ = process.kill()
+		_ = process.wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		client := redis.NewClient(&redis.Options{Network: "unix", Addr: socket, MaxRetries: 0})
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := client.Ping(ctx).Err()
+		cancel()
+		_ = client.Close()
+		if err == nil {
+			return process
+		}
+		select {
+		case <-process.done:
+			log, _ := os.ReadFile(filepath.Join(dataDir, "redis.log"))
+			t.Fatalf("Redis exited during startup: %v: %s", process.waitErr, strings.TrimSpace(string(log)))
+		default:
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("isolated Redis did not become ready; see %s", filepath.Join(dataDir, "redis.log"))
+	return nil
+}
+
+func (p *crashTestRedisProcess) kill() error {
+	var result error
+	p.killOnce.Do(func() {
+		if p.cmd.Process == nil {
+			return
+		}
+		result = p.cmd.Process.Kill()
+	})
+	return result
+}
+
+func (p *crashTestRedisProcess) wait() error {
+	select {
+	case <-p.done:
+		return p.waitErr
+	case <-time.After(5 * time.Second):
+		return errors.New("Redis process did not exit")
+	}
+}
+
+func crashTestRedisClient(t *testing.T, socket string) *redis.Client {
+	t.Helper()
+	client := redis.NewClient(&redis.Options{Network: "unix", Addr: socket, MaxRetries: 0})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		t.Fatalf("isolated Redis is unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return client
 }
 
 func armJournalFault(journal *RedisJournal, stage redisJournalFaultStage, operationID string) func() bool {

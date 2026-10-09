@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: contracts-check test-ledger-recovery test-ledger-redis bootstrap-dev config-check verify-infra-foundations up down smoke network-check test-protocol test-edge
+.PHONY: contracts-check test-ledger-recovery test-ledger-redis test-ledger-redis-process bootstrap-dev config-check verify-infra-foundations up down smoke network-check test-protocol test-edge
 
 contracts-check:
 	sh scripts/contracts-check.sh
@@ -35,6 +35,10 @@ test-ledger-recovery:
 test-ledger-redis:
 	@test -n "$${CORDOVA_TEST_REDIS_URL:-}" || { echo "CORDOVA_TEST_REDIS_URL must point to an isolated Redis instance with AOF enabled" >&2; exit 2; }
 	cd server && $(GO) test -race -count=1 -v ./internal/billing ./internal/m1
+
+test-ledger-redis-process:
+	@test -n "$${CORDOVA_TEST_REDIS_SERVER:-}" || { echo "CORDOVA_TEST_REDIS_SERVER must point to an isolated redis-server executable" >&2; exit 2; }
+	cd server && $(GO) test -race -count=1 -v -run '^TestRedisJournalIntegrationRedisProcessRestartAfterAppend$$' ./internal/billing
 
 test-edge:
 	python3 scripts/test-edge.py
