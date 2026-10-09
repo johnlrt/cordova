@@ -109,11 +109,13 @@ jobs:
           chmod 0644 .local/*
           docker compose -f infra/compose.yaml -f infra/compose.dev.yaml up --build --wait || {
             docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps --all
-            redpanda_container_id="$(docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps -q redpanda)"
-            if [ -n "$redpanda_container_id" ]; then
-              docker inspect --format '{{json .State.Health}}' "$redpanda_container_id" || true
-            fi
-            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color redis redpanda
+            for service_name in edge redpanda; do
+              service_container_id="$(docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps -q "$service_name")"
+              if [ -n "$service_container_id" ]; then
+                docker inspect --format "$service_name: {{json .State.Health}}" "$service_container_id" || true
+              fi
+            done
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color edge redis redpanda
             exit 1
           }
       - name: Verify frontend auth and live usage through nginx
