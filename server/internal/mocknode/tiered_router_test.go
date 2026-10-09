@@ -94,7 +94,7 @@ func tieredStatus(n int, state ModelResidency, rank, slots int) NodeStatus {
 	status := NodeStatus{
 		NodeID: testNodeID(n), SessionID: testNodeID(n + 100), Generation: 1, Online: true,
 		LastHeartbeat: time.Now().UTC(), CatalogVersion: testCatalogVersion, ModelState: state,
-		BenchmarkedAt: time.Now().UTC().Add(-time.Minute), VerifiedSlots: slots,
+		BenchmarkedAt: time.Now().UTC().Add(-time.Minute), BenchmarkPassed: true, VerifiedSlots: slots,
 		VerifiedCapacityBytes: 2048, AvailableDiskBytes: 4096, Rank: rank,
 		FirstTokenLatency: 100 * time.Millisecond,
 	}
@@ -280,12 +280,34 @@ func TestTieredRouterRejectsOutOfOrderHeartbeat(t *testing.T) {
 	}
 }
 
+func TestTieredRouterSkipsWrongCatalogAndArtifactWithoutRejectingInventory(t *testing.T) {
+	good := tieredStatus(17, ModelLoaded, 10, 1)
+	wrongCatalog := tieredStatus(18, ModelLoaded, 100, 1)
+	wrongCatalog.CatalogVersion = "00000000-0000-4000-8000-000000000098"
+	wrongArtifact := tieredStatus(19, ModelLoaded, 90, 1)
+	wrongArtifact.ArtifactSHA256 = strings.Repeat("b", 64)
+	router, _ := newTieredRouterForTest(t, []NodeStatus{good, wrongCatalog, wrongArtifact}, nil)
+
+	attempt := acquireTiered(t, router, nil)
+	if attempt.OwnerID() != good.NodeID {
+		t.Fatalf("selected node %s, want the only catalog/hash match %s", attempt.OwnerID(), good.NodeID)
+	}
+	attempt.Release(context.Background())
+	if _, err := router.Acquire(context.Background(), api.ModelID, map[string]struct{}{good.NodeID: {}}, time.Now().Add(time.Second)); !errors.Is(err, requestcoord.ErrNoCapacity) {
+		t.Fatalf("wrong catalog/hash nodes supplied capacity: %v", err)
+	}
+}
+
 func TestTieredRouterRejectsStaleAndHeldNodes(t *testing.T) {
 	stale := tieredStatus(11, ModelLoaded, 100, 1)
 	stale.LastHeartbeat = time.Now().Add(-maxNodeHeartbeatAge)
 	held := tieredStatus(12, ModelLoaded, 100, 1)
 	held.Held = true
-	router, _ := newTieredRouterForTest(t, []NodeStatus{stale, held}, nil)
+	failedBenchmark := tieredStatus(15, ModelLoaded, 100, 1)
+	failedBenchmark.BenchmarkPassed = false
+	undersized := tieredStatus(16, ModelLoaded, 100, 1)
+	undersized.VerifiedCapacityBytes = 128
+	router, _ := newTieredRouterForTest(t, []NodeStatus{stale, held, failedBenchmark, undersized}, nil)
 	if _, err := router.Acquire(context.Background(), api.ModelID, nil, time.Now().Add(time.Second)); !errors.Is(err, requestcoord.ErrNoCapacity) {
 		t.Fatalf("Acquire() error = %v, want no capacity", err)
 	}

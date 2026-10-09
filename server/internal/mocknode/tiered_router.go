@@ -43,6 +43,7 @@ type NodeStatus struct {
 	ArtifactSHA256        string
 	ModelState            ModelResidency
 	BenchmarkedAt         time.Time
+	BenchmarkPassed       bool
 	VerifiedSlots         int
 	VerifiedCapacityBytes int64
 	AvailableDiskBytes    int64
@@ -119,8 +120,7 @@ func NewTieredRequestRouter(config TieredRouterConfig) (*TieredRequestRouter, er
 		requiredArtifactBytes: config.RequiredArtifactBytes, controller: config.Controller,
 		now: config.Now, nodes: make(map[string]*tieredNode, len(config.Nodes))}
 	for _, candidate := range config.Nodes {
-		if candidate.Provider == nil || validateNodeStatus(candidate.Status) != nil ||
-			candidate.Status.CatalogVersion != config.CatalogVersion {
+		if candidate.Provider == nil || validateNodeStatus(candidate.Status) != nil {
 			return nil, errors.New("tiered router contains invalid node metadata")
 		}
 		if _, exists := router.nodes[candidate.Status.NodeID]; exists {
@@ -272,7 +272,8 @@ func (r *TieredRequestRouter) hasPreparationLocked(excluded map[string]struct{})
 func (r *TieredRequestRouter) baseEligible(status NodeStatus, now time.Time) bool {
 	return status.Online && !status.Quarantined && !status.Held && status.CatalogVersion == r.catalogVersion &&
 		!status.LastHeartbeat.IsZero() && !status.LastHeartbeat.After(now) && now.Sub(status.LastHeartbeat) < maxNodeHeartbeatAge &&
-		!status.BenchmarkedAt.IsZero() && !status.BenchmarkedAt.After(now) && now.Sub(status.BenchmarkedAt) < maxBenchmarkAge &&
+		status.BenchmarkPassed && !status.BenchmarkedAt.IsZero() && !status.BenchmarkedAt.After(now) && now.Sub(status.BenchmarkedAt) < maxBenchmarkAge &&
+		status.VerifiedCapacityBytes >= r.requiredCapacityBytes &&
 		status.VerifiedSlots > 0
 }
 
@@ -286,7 +287,7 @@ func (r *TieredRequestRouter) claimLocked(node *tieredNode) *tieredAttempt {
 // UpdateStatus replaces the server-observed node state. A higher generation
 // fences every lease from the prior WebSocket session before it can complete.
 func (r *TieredRequestRouter) UpdateStatus(status NodeStatus) error {
-	if err := validateNodeStatus(status); err != nil || status.CatalogVersion != r.catalogVersion {
+	if err := validateNodeStatus(status); err != nil {
 		return errors.New("invalid node session status")
 	}
 	r.mu.Lock()

@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | `go fmt ./...` | Прошла из `server/` | Выполнена установленным `go1.27.2`. |
 | `go test -count=1 ./...` | Все Go packages прошли, включая coordinator/API route errors и mock C6 tiered router | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`. |
-| `go test -race -count=1 ./...` | Все Go packages прошли под race detector, включая загрузку/прогрев моделей и fencing тесты | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; C3 live sessions не реализованы. |
+| `go test -race -count=1 ./...` | Все Go packages прошли под race detector, включая C6 selection filters, загрузку/прогрев моделей и fencing тесты | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; C3 live sessions не реализованы. |
 | `go vet ./...` | Прошла | Выполнена установленным `go1.27.2`. |
 | `go build ./cmd/gateway ./cmd/mock-node` | Прошла | Компилирует Go gateway и mock-node; tiered router пока не подключён к gateway. |
 | `make test-ledger-recovery` | Race tests ledger/coordinator, API idempotency/cancel, M1 request path и mock C6 routing прошли | Redis integration cases пропускаются, когда не задан `CORDOVA_TEST_REDIS_URL`; crash injection на каждой Redis write/barrier границе не выполнен. |
