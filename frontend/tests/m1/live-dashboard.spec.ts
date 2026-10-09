@@ -100,18 +100,18 @@ test('M1 account dashboard receives real usage invalidation and isolates account
       ? await requestResponse.json() as { status?: string }
       : null;
     const usageRequestIds = usage?.data?.map((row) => row.request_id).filter((id): id is string => Boolean(id)) ?? [];
-    return {
+    return JSON.stringify({
       usageStatus: usageResponse.status,
       usageRequestIds,
       requestStatus: requestResponse.status,
       requestState: request?.status ?? null,
       hasRequest: usageRequestIds.includes(requestId)
-    };
+    });
   }, result.requestId), {
     message: 'REST usage projection did not contain the completed request',
     timeout: 15_000,
     intervals: [250, 500, 1_000, 2_000]
-  }).toMatchObject({ hasRequest: true });
+  }).toContain(result.requestId);
   await expect(page.getByText(`#${result.requestId.slice(0, 8)}`)).toBeVisible();
   await expect(page.locator('body')).not.toContainText(prompt);
 

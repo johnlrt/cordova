@@ -131,6 +131,26 @@ jobs:
       - name: Capture safe gateway diagnostics after M1 failure
         if: failure()
         run: docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color gateway
+      - name: Capture safe usage pipeline counters after M1 failure
+        if: failure()
+        run: |
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redis sh -c '
+            export REDISCLI_AUTH="$(cat /run/secrets/redis_password)"
+            printf "usage_outbox_length="
+            redis-cli --raw XLEN cv:v1:outbox:usage
+            printf "usage_recovery_pending="
+            redis-cli --raw SCARD cv:v1:usage:pending
+            redis-cli --raw --scan --pattern "cv:v1:account-usage:*" | while IFS= read -r key; do
+              printf "account_usage_rows="
+              redis-cli --raw XLEN "$key"
+            done
+            redis-cli --raw --scan --pattern "cv:v1:key-usage:*" | while IFS= read -r key; do
+              printf "key_usage_rows="
+              redis-cli --raw XLEN "$key"
+            done
+          '
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redpanda rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092 || true
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redpanda rpk group describe cordova-usage-projection-v1 --brokers redpanda:9092 || true
       - name: Verify M1 request and edge acceptance flows
         run: |
           make smoke
