@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"cordova/server/internal/api"
+	"cordova/server/internal/billing"
 	"cordova/server/internal/domain"
 	"cordova/server/internal/inference"
 
@@ -50,12 +51,14 @@ type Config struct {
 	Pepper               []byte
 	SecureCookies        bool
 	TrustProxy           bool
+	UsagePendingKey      string
 }
 
 type Store struct {
-	redis      *redis.Client
-	cfg        Config
-	argonSlots chan struct{}
+	redis           *redis.Client
+	cfg             Config
+	argonSlots      chan struct{}
+	usagePendingKey string
 }
 
 type accountRecord struct {
@@ -135,7 +138,174 @@ func NewStore(client *redis.Client, cfg Config) (*Store, error) {
 	if client == nil || len(cfg.Pepper) < 32 || !validOrigin(cfg.Origin) || !strings.HasPrefix(strings.ToLower(cfg.Origin), "https://") || cfg.PrivacyNoticeVersion == "" || len(cfg.PrivacyNoticeVersion) > 64 {
 		return nil, errors.New("M1 store requires Redis, origin, privacy version and a 32-byte pepper")
 	}
-	return &Store{redis: client, cfg: cfg, argonSlots: make(chan struct{}, 4)}, nil
+	if cfg.UsagePendingKey == "" {
+		cfg.UsagePendingKey = billing.DefaultUsagePendingKey
+	}
+	return &Store{redis: client, cfg: cfg, argonSlots: make(chan struct{}, 4), usagePendingKey: cfg.UsagePendingKey}, nil
+}
+
+// Claim implements the C2 client idempotency mapping. The client key and
+// canonical request body are persisted only as peppered HMAC digests.
+func (s *Store) Claim(ctx context.Context, principal api.Principal, clientKey, modelID, requestID string,
+	canonicalBody []byte) (api.IdempotencyDecision, error) {
+	if principal.Kind != "key" || principal.AccountID == "" || principal.KeyID == "" || clientKey == "" ||
+		len(canonicalBody) == 0 || modelID != api.ModelID {
+		return api.IdempotencyDecision{}, ErrInvalid
+	}
+	if _, err := domain.ParseID(principal.AccountID); err != nil {
+		return api.IdempotencyDecision{}, ErrInvalid
+	}
+	if _, err := domain.ParseID(principal.KeyID); err != nil {
+		return api.IdempotencyDecision{}, ErrInvalid
+	}
+	if _, err := domain.ParseID(requestID); err != nil {
+		return api.IdempotencyDecision{}, ErrInvalid
+	}
+	keyHash := s.secretVerifier("idempotency-key-v1\n" + principal.AccountID + "\n" + principal.KeyID + "\n" + clientKey)
+	bodyHash := s.secretVerifier("idempotency-body-v1\n" + string(canonicalBody))
+	base := "cv:v1:idempotency:" + principal.AccountID + ":" + principal.KeyID + ":" + keyHash
+	requestIndex := "cv:v1:idempotency-request:" + requestID
+	result, err := s.redis.Eval(ctx, `
+local record_type=redis.call('TYPE',KEYS[1]).ok
+local body_type=redis.call('TYPE',KEYS[2]).ok
+local key_type=redis.call('TYPE',KEYS[3]).ok
+local pending_type=redis.call('TYPE',KEYS[4]).ok
+local request_type=redis.call('TYPE',KEYS[5]).ok
+if (record_type~='none' and record_type~='hash') or (body_type~='none' and body_type~='string') or key_type~='string' or (pending_type~='none' and pending_type~='set') or (request_type~='none' and request_type~='string') then return redis.error_reply('idempotency key type mismatch') end
+local decoded,key=pcall(cjson.decode,redis.call('GET',KEYS[3]))
+if not decoded or type(key)~='table' or key['id']~=ARGV[1] or key['account_id']~=ARGV[2] or key['revoked_at']~=cjson.null then return cjson.encode({unauthorized=true}) end
+local can_chat=false
+for _,scope in ipairs(key['permissions'] or {}) do if scope=='chat:write' then can_chat=true end end
+local can_model=false
+for _,model in ipairs(key['model_ids'] or {}) do if model==ARGV[3] then can_model=true end end
+if not can_chat or not can_model then return cjson.encode({unauthorized=true}) end
+if record_type=='hash' then
+  local original=redis.call('HGET',KEYS[1],'request_id') or ''
+  local status=redis.call('HGET',KEYS[1],'status') or 'in_progress'
+  local digest=redis.call('GET',KEYS[2])
+  return cjson.encode({created=false,request_id=original,status=status,compared=digest~=false,body_match=digest==ARGV[4]})
+end
+if body_type~='none' then return redis.error_reply('idempotency digest exists without a record') end
+if request_type~='none' then return redis.error_reply('idempotency request identifier collision') end
+redis.call('HSET',KEYS[1],'request_id',ARGV[5],'status','in_progress','created_at',ARGV[6])
+redis.call('SET',KEYS[2],ARGV[4],'EX',2592000)
+	redis.call('SET',KEYS[5],KEYS[1])
+	redis.call('SADD',KEYS[4],ARGV[5])
+	return cjson.encode({created=true,request_id=ARGV[5],status='in_progress',compared=true,body_match=true})`,
+		[]string{base, base + ":body", keyPrefix + principal.KeyID, "cv:v1:idempotency-pending", requestIndex}, principal.KeyID, principal.AccountID, modelID,
+		bodyHash, requestID, time.Now().UTC().Format(time.RFC3339Nano)).Text()
+	if err != nil {
+		return api.IdempotencyDecision{}, err
+	}
+	var response struct {
+		Created      bool   `json:"created"`
+		Unauthorized bool   `json:"unauthorized"`
+		RequestID    string `json:"request_id"`
+		Status       string `json:"status"`
+		Compared     bool   `json:"compared"`
+		BodyMatch    bool   `json:"body_match"`
+	}
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		return api.IdempotencyDecision{}, errors.New("idempotency record is malformed")
+	}
+	if response.Unauthorized {
+		return api.IdempotencyDecision{}, api.ErrIdempotencyUnauthorized
+	}
+	if response.RequestID == "" || response.Status == "" {
+		return api.IdempotencyDecision{}, errors.New("idempotency record is incomplete")
+	}
+	return api.IdempotencyDecision{Created: response.Created, RequestID: response.RequestID, Status: response.Status,
+		Compared: response.Compared, BodyMatch: response.BodyMatch}, nil
+}
+
+// Complete marks an idempotency mapping terminal after the accounted request
+// and content-free usage projection have been durably acknowledged.
+func (s *Store) Complete(ctx context.Context, principal api.Principal, clientKey, requestID, status string) error {
+	if principal.Kind != "key" || principal.AccountID == "" || principal.KeyID == "" || clientKey == "" {
+		return ErrInvalid
+	}
+	if status != "settled" && status != "cancelled" && status != "refunded" && status != "failed" {
+		return ErrInvalid
+	}
+	if _, err := domain.ParseID(requestID); err != nil {
+		return ErrInvalid
+	}
+	keyHash := s.secretVerifier("idempotency-key-v1\n" + principal.AccountID + "\n" + principal.KeyID + "\n" + clientKey)
+	base := "cv:v1:idempotency:" + principal.AccountID + ":" + principal.KeyID + ":" + keyHash
+	return s.completeIdempotencyRecord(ctx, base, requestID, status)
+}
+
+func (s *Store) completeIdempotencyRecord(ctx context.Context, recordKey, requestID, status string) error {
+	changed, err := s.redis.Eval(ctx, `
+local record_type=redis.call('TYPE',KEYS[1]).ok
+local pending_type=redis.call('TYPE',KEYS[2]).ok
+local request_type=redis.call('TYPE',KEYS[3]).ok
+if record_type~='hash' or (pending_type~='none' and pending_type~='set') or (request_type~='none' and request_type~='string') then return redis.error_reply('idempotency completion key type mismatch') end
+if redis.call('HGET',KEYS[1],'request_id')~=ARGV[1] then return 0 end
+if redis.call('GET',KEYS[3])~=KEYS[1] then return 0 end
+local current=redis.call('HGET',KEYS[1],'status')
+if current=='settled' or current=='cancelled' or current=='refunded' or current=='failed' then
+  if current==ARGV[2] then return 1 end
+  return 0
+end
+redis.call('HSET',KEYS[1],'status',ARGV[2],'completed_at',ARGV[3])
+	redis.call('SREM',KEYS[2],ARGV[1])
+	redis.call('DEL',KEYS[3])
+	return 1`, []string{recordKey, "cv:v1:idempotency-pending", "cv:v1:idempotency-request:" + requestID}, requestID, status, time.Now().UTC().Format(time.RFC3339Nano)).Int()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// ReconcileIdempotency completes mappings left in progress by a process crash.
+// It runs after ledger recovery, before the gateway accepts requests.
+func (s *Store) ReconcileIdempotency(ctx context.Context, ledger interface {
+	Request(context.Context, string) (billing.RequestCheckpoint, uint64, error)
+}) error {
+	requestIDs, err := s.redis.SMembers(ctx, "cv:v1:idempotency-pending").Result()
+	if err != nil {
+		return err
+	}
+	for _, requestID := range requestIDs {
+		if _, err := domain.ParseID(requestID); err != nil {
+			return errors.New("idempotency recovery found an invalid request identifier")
+		}
+		requestIndex := "cv:v1:idempotency-request:" + requestID
+		recordKey, getErr := s.redis.Get(ctx, requestIndex).Result()
+		if errors.Is(getErr, redis.Nil) {
+			return errors.New("idempotency recovery index is missing")
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if !strings.HasPrefix(recordKey, "cv:v1:idempotency:") {
+			return errors.New("idempotency recovery index is invalid")
+		}
+		checkpoint, _, requestErr := ledger.Request(ctx, requestID)
+		status := "failed"
+		if requestErr == nil {
+			switch checkpoint.Status {
+			case billing.RequestSettled:
+				status = "settled"
+			case billing.RequestCancelled:
+				status = "cancelled"
+			case billing.RequestRefunded:
+				status = "refunded"
+			default:
+				return errors.New("idempotency recovery found a nonterminal ledger request")
+			}
+		} else if !errors.Is(requestErr, billing.ErrRequestNotFound) && !errors.Is(requestErr, billing.ErrInvalidOperation) {
+			return requestErr
+		}
+		if err := s.completeIdempotencyRecord(ctx, recordKey, requestID, status); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Register(ctx context.Context, username, password, notice, remote string) (Account, []string, error) {
@@ -648,7 +818,8 @@ func (s *Store) Authenticate(r *http.Request) (api.Principal, bool) {
 			for _, model := range key.ModelIDs {
 				models[model] = true
 			}
-			return api.Principal{AccountID: key.AccountID, Kind: "key", Scopes: scopes, KeyID: key.ID, AllowedModels: models}, true
+			return api.Principal{AccountID: key.AccountID, Kind: "key", Scopes: scopes, KeyID: key.ID,
+				AllowedModels: models, DailySpendCapPiconero: key.DailyCap}, true
 		}
 		return api.Principal{}, false
 	}
@@ -767,6 +938,23 @@ return 1`, []string{"cv:v1:account-keys:" + accountID, keyPrefix + keyID, keyInd
 }
 
 func (s *Store) AddUsage(ctx context.Context, accountID, keyID, requestID, modelID string, usage inference.Usage, latency time.Duration) error {
+	return s.addUsage(ctx, accountID, keyID, requestID, modelID, "completed", "0", usage, latency)
+}
+
+func (s *Store) AddAccountedUsage(ctx context.Context, accountID, keyID, requestID, modelID, status, charged string,
+	usage inference.Usage, latency time.Duration) error {
+	if status != "settled" && status != "cancelled" && status != "refunded" {
+		return ErrInvalid
+	}
+	amount, err := domain.ParsePiconero(charged)
+	if err != nil || amount.String() != charged {
+		return ErrInvalid
+	}
+	return s.addUsage(ctx, accountID, keyID, requestID, modelID, status, charged, usage, latency)
+}
+
+func (s *Store) addUsage(ctx context.Context, accountID, keyID, requestID, modelID, status, charged string,
+	usage inference.Usage, latency time.Duration) error {
 	if _, err := domain.ParseID(accountID); err != nil {
 		return err
 	}
@@ -784,7 +972,11 @@ func (s *Store) AddUsage(ctx context.Context, accountID, keyID, requestID, model
 	if err != nil {
 		return err
 	}
-	entry := usageEvent{V: 1, EventID: eventID.String(), EventType: "request.updated", OccurredAt: now, ObservedAt: now, RequestID: &requestID, Payload: usageProjection{AccountID: accountID, APIKeyID: keyID, ModelID: modelID, Status: "completed", InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens, Charged: "0", LatencyMS: latency.Milliseconds(), Revision: 1, CreatedAt: now, FinishedAt: now}}
+	entry := usageEvent{V: 1, EventID: eventID.String(), EventType: "request.updated", OccurredAt: now, ObservedAt: now, RequestID: &requestID, Payload: usageProjection{AccountID: accountID, APIKeyID: keyID, ModelID: modelID, Status: status, InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens, Charged: charged, LatencyMS: latency.Milliseconds(), Revision: 1, CreatedAt: now, FinishedAt: now}}
+	return s.writeUsageEvent(ctx, requestID, keyID, accountID, modelID, entry)
+}
+
+func (s *Store) writeUsageEvent(ctx context.Context, requestID, keyID, accountID, modelID string, entry usageEvent) error {
 	encoded, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -793,11 +985,12 @@ func (s *Store) AddUsage(ctx context.Context, accountID, keyID, requestID, model
 local key_type=redis.call('TYPE',KEYS[1]).ok
 local sequence_type=redis.call('TYPE',KEYS[2]).ok
 local outbox_type=redis.call('TYPE',KEYS[3]).ok
+local pending_type=redis.call('TYPE',KEYS[4]).ok
 if key_type~='string' then return 0 end
-if (sequence_type~='none' and sequence_type~='string') or (outbox_type~='none' and outbox_type~='stream') then return redis.error_reply('usage outbox key type mismatch') end
+if (sequence_type~='none' and sequence_type~='string') or (outbox_type~='none' and outbox_type~='stream') or (pending_type~='none' and pending_type~='set') then return redis.error_reply('usage outbox key type mismatch') end
 local key_data=redis.call('GET',KEYS[1])
 local decoded,key=pcall(cjson.decode,key_data)
-if not decoded or type(key)~='table' or key['id']~=ARGV[1] or key['account_id']~=ARGV[2] or key['revoked_at']~=cjson.null then return 0 end
+if not decoded or type(key)~='table' or key['id']~=ARGV[1] or key['account_id']~=ARGV[2] then return 0 end
 local can_chat=false
 for _,scope in ipairs(key['permissions'] or {}) do if scope=='chat:write' then can_chat=true end end
 local can_use_model=false
@@ -807,7 +1000,8 @@ local seq=redis.call('INCR',KEYS[2])
 local event=cjson.decode(ARGV[4]); event['sequence']=seq
 local body=cjson.encode(event)
 redis.call('XADD',KEYS[3],'*','event_id',event['event_id'],'account_id',event['payload']['account_id'],'payload',body)
-return 1`, []string{keyPrefix + keyID, "cv:v1:outbox-sequence:usage", "cv:v1:outbox:usage"}, keyID, accountID, modelID, string(encoded)).Int()
+redis.call('SREM',KEYS[4],ARGV[5])
+return 1`, []string{keyPrefix + keyID, "cv:v1:outbox-sequence:usage", "cv:v1:outbox:usage", s.usagePendingKey}, keyID, accountID, modelID, string(encoded), requestID).Int()
 	if err != nil {
 		return err
 	}
@@ -815,6 +1009,132 @@ return 1`, []string{keyPrefix + keyID, "cv:v1:outbox-sequence:usage", "cv:v1:out
 		return ErrNotFound
 	}
 	return nil
+}
+
+type usageRecoveryLedger interface {
+	PendingUsageRequestIDs(context.Context) ([]string, error)
+	Request(context.Context, string) (billing.RequestCheckpoint, uint64, error)
+	Operation(context.Context, string) (billing.Entry, error)
+}
+
+// ReconcileAccountedUsage republishes terminal ledger metadata that was left
+// pending by a crash between the financial append and the account outbox write.
+func (s *Store) ReconcileAccountedUsage(ctx context.Context, ledger usageRecoveryLedger) error {
+	if ledger == nil {
+		return errors.New("usage recovery requires an accounting ledger")
+	}
+	requestIDs, err := ledger.PendingUsageRequestIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, requestID := range requestIDs {
+		checkpoint, _, err := ledger.Request(ctx, requestID)
+		if err != nil {
+			return err
+		}
+		if checkpoint.Status != billing.RequestSettled && checkpoint.Status != billing.RequestCancelled && checkpoint.Status != billing.RequestRefunded {
+			return errors.New("usage recovery found a nonterminal ledger request")
+		}
+		if checkpoint.InputTokens < 0 || checkpoint.InputTokens > int64(^uint(0)>>1) {
+			return errors.New("usage recovery found invalid input token metadata")
+		}
+		outputTokens := int64(0)
+		foundOutputAttempt := false
+		for _, attempt := range checkpoint.Attempts {
+			if attempt.Reservation.Status == billing.AttemptSettled || attempt.Reservation.Status == billing.AttemptCancelled {
+				if foundOutputAttempt {
+					return errors.New("usage recovery found multiple terminal output attempts")
+				}
+				foundOutputAttempt = true
+				outputTokens = attempt.OutputTokens
+			}
+		}
+		if (checkpoint.Status == billing.RequestSettled || checkpoint.Status == billing.RequestCancelled) && !foundOutputAttempt {
+			return errors.New("usage recovery found no terminal output attempt")
+		}
+		if outputTokens < 0 || outputTokens > int64(^uint(0)>>1) {
+			return errors.New("usage recovery found invalid output token metadata")
+		}
+		charged, err := domain.NewPiconero(0)
+		if err != nil {
+			return err
+		}
+		if checkpoint.Status == billing.RequestSettled || checkpoint.Status == billing.RequestCancelled {
+			quote, quoteErr := billing.CalculateQuote(checkpoint.InputTokens, outputTokens, checkpoint.MaxOutputTokens,
+				checkpoint.Price, checkpoint.Status == billing.RequestCancelled)
+			if quoteErr != nil {
+				return quoteErr
+			}
+			charged = quote.ActualCost
+		}
+		finishedAt, err := usageTerminalTime(ctx, ledger, requestID, checkpoint)
+		if err != nil {
+			return err
+		}
+		latency := finishedAt.Sub(checkpoint.AcceptedAt)
+		if latency < 0 {
+			latency = 0
+		}
+		eventID, err := domain.NewID()
+		if err != nil {
+			return err
+		}
+		observedAt := time.Now().UTC()
+		requestIDCopy := requestID
+		status := string(checkpoint.Status)
+		entry := usageEvent{V: 1, EventID: eventID.String(), EventType: "request.updated", OccurredAt: finishedAt.UTC().Format(time.RFC3339Nano),
+			ObservedAt: observedAt.Format(time.RFC3339Nano), RequestID: &requestIDCopy,
+			Payload: usageProjection{AccountID: checkpoint.AccountID, APIKeyID: checkpoint.APIKeyID, ModelID: checkpoint.ModelID,
+				Status: status, InputTokens: int(checkpoint.InputTokens), OutputTokens: int(outputTokens), Charged: charged.String(),
+				LatencyMS: latency.Milliseconds(), Revision: 1, CreatedAt: checkpoint.AcceptedAt.UTC().Format(time.RFC3339Nano),
+				FinishedAt: finishedAt.UTC().Format(time.RFC3339Nano)}}
+		if err := s.writeUsageEvent(ctx, requestID, checkpoint.APIKeyID, checkpoint.AccountID, checkpoint.ModelID, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func usageTerminalTime(ctx context.Context, ledger usageRecoveryLedger, requestID string,
+	checkpoint billing.RequestCheckpoint) (time.Time, error) {
+	operationID := ""
+	switch checkpoint.Status {
+	case billing.RequestSettled:
+		operationID = "settle:" + requestID
+	case billing.RequestCancelled:
+		operationID = "cancel:" + requestID
+	case billing.RequestRefunded:
+		operationID = "abandon:" + requestID
+	}
+	if operationID != "" {
+		entry, err := ledger.Operation(ctx, operationID)
+		if err == nil {
+			return entry.CreatedAt.UTC(), nil
+		}
+		if !errors.Is(err, billing.ErrRequestNotFound) {
+			return time.Time{}, err
+		}
+	}
+	var latest time.Time
+	for attemptID, attempt := range checkpoint.Attempts {
+		if attempt.Reservation.Status != billing.AttemptRefunded {
+			continue
+		}
+		entry, err := ledger.Operation(ctx, "refund:"+requestID+":"+attemptID)
+		if errors.Is(err, billing.ErrRequestNotFound) {
+			continue
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+		if entry.CreatedAt.After(latest) {
+			latest = entry.CreatedAt
+		}
+	}
+	if latest.IsZero() {
+		return time.Time{}, errors.New("usage recovery could not locate the terminal ledger operation")
+	}
+	return latest.UTC(), nil
 }
 
 type UsageRow struct {
@@ -860,9 +1180,12 @@ func (s *Store) Usage(ctx context.Context, accountID, keyID string) ([]UsageRow,
 }
 
 func projectUsage(ctx context.Context, client *redis.Client, event usageEvent) error {
+	amount, amountErr := domain.ParsePiconero(event.Payload.Charged)
+	validStatus := event.Payload.Status == "completed" || event.Payload.Status == "settled" ||
+		event.Payload.Status == "cancelled" || event.Payload.Status == "refunded"
 	if event.V != 1 || event.EventType != "request.updated" || event.RequestID == nil || event.Sequence < 1 ||
-		event.Payload.AccountID == "" || event.Payload.ModelID != api.ModelID || event.Payload.Charged != "0" ||
-		event.Payload.Status != "completed" || event.Payload.InputTokens < 0 || event.Payload.OutputTokens < 0 ||
+		event.Payload.AccountID == "" || event.Payload.ModelID != api.ModelID || !validStatus || amountErr != nil || amount.String() != event.Payload.Charged ||
+		event.Payload.InputTokens < 0 || event.Payload.OutputTokens < 0 ||
 		event.Payload.LatencyMS < 0 || event.Payload.Revision < 1 {
 		return ErrInvalid
 	}

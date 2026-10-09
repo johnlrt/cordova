@@ -1,13 +1,14 @@
 # Cordova — infrastructure and release agent plan
 
 **Goal:** Make Cordova reproducibly deployable and recoverable with private data services, isolated Monero custody and verified portable node releases.
-**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Owner:** infrastructure agent. **Status:** implementation queue; Compose/CI configuration does not yet exist.
+**Date:** 2026-10-09 (Asia/Baku). **Version:** v2. **Owner:** infrastructure agent. **Status:** Stage 1 has a Go-only GitHub Actions workflow; Stage 2 has contract schemas and a checker, but CI does not run that checker yet. Compose and deployment manifests do not exist.
 
 Apply planiuer Core (deployment dependencies), Security (network/secrets/custody), Quality (repeatable configuration), and First-Run (clean-stack/restore/release proof). Skip none. Read [PLAN.md](PLAN.md) first; it exclusively owns shared contracts, financial policy, transport/auth rules, persistence requirements, threats, defaults and milestone gates. This file owns deployment manifests, CI/CD, operations, backups and release plumbing. Do not reproduce endpoint/message/ledger schemas here.
 
 ## Summary
 
-Expose only nginx and keep Redis, Kafka, wallet RPC, tokenizer and workers private.
+First wire the Stage 2 contract checker into the existing CI workflow without requiring Docker or external services.
+Then expose only nginx and keep Redis, Kafka, wallet RPC, tokenizer and workers private.
 Run a default isolated stagenet Compose stack and a capped production overlay.
 Require off-host Redis replica fsync for production money and disable automatic financial failover.
 Use encrypted off-host backups, content-free monitoring and tested reconciliation-led recovery.
@@ -96,13 +97,21 @@ Central config inventory: `PUBLIC_ORIGIN`, `MONERO_NETWORK` default stagenet, mo
 
 All commands below are planned commands to implement. Each task has an executable gate; dependencies refer to [shared milestones](PLAN.md#core-3--dependency-ordered-milestones).
 
-### I0 — Verify versions, inputs and reproducibility (M0; first; S)
+### I0 — Gate the Stage 2 contract foundation (Stage 2 / B0; first; S)
+
+Extend the existing `.github/workflows/ci.yml` with a repository-root contract job. Run `sh scripts/contracts-check.sh` on pushes and pull requests using the existing read-only workflow permissions and pinned action revisions. Keep the current Go format, vet, race-test and build checks. The checker uses Python's standard library; do not add a contract-tool dependency or require Docker for this gate. The job must validate the Stage 2 OpenAPI, node/dashboard WS and tokenizer schemas and their accepted/rejected fixtures as documented in [Stage 2](docs/stage-2.md).
+
+Keep contract validation separate from B0 external integration evidence. A green CI job does not prove Redis Lua/`WAITAOF`, Kafka outbox/replay, tokenizer/model parity, SOCKS5h, wallet behavior, Compose isolation or nginx behavior. Record each real probe and any unavailable prerequisite in `docs/verification.md`; unavailable is not passed. Backend owns schema semantics and fixtures; infra owns invoking their check consistently in CI.
+
+**Done when:** a clean push/PR workflow runs `sh scripts/contracts-check.sh` alongside all Stage 1 Go checks; schema or fixture violations fail the contract job; the job needs no secrets, Docker daemon or external services; the recorded CI result is distinguishable from all still-open B0 integration probes.
+
+### I0b — Verify versions, inputs and reproducibility (M0; after I0; S)
 
 Inventory actual Docker/Compose, host OS/CPU/memory/disk, Go/Rust/Node/CMake and GPU release-runner tools before choosing image flags. Pin maintained compatible patches/digests and lock CI actions to commit SHAs. Confirm `WAITAOF`, KRaft bootstrap/SASL, nginx streaming/upgrades, wallet digest auth/daemon sync and replica TLS against pinned images; capture content-free real samples with backend B0. Verify model/dependency redistribution licenses and source checksum/signature procedures. Name all config/secret inputs in one validation schema with safe dev defaults and mandatory production errors.
 
 **Done when:** `make config-check && make verify-infra-foundations` runs from a clean clone, lists exact versions/digests and demonstrates private native Redis/Kafka, local TLS, wallet isolation and production-required secret validation.
 
-### I1 — Build Compose, edge and mock-node slice (M1; I0; parallel with backend/frontend; M)
+### I1 — Build Compose, edge and mock-node slice (M1; I0b; parallel with backend/frontend; M)
 
 Build multi-stage non-root images; keep compilers/package caches out of runtime. Add health checks for process/dependency readiness, resource limits, restart policies, read-only root filesystems, tmpfs runtime paths, `cap_drop: ALL`, `no-new-privileges`, unprivileged users and disabled core dumps where supported. Grant only required volumes/writes; no Docker socket mount. Use nginx static frontend deep-link fallback and private server upstream routes. `depends_on` helps initial order but every service must handle reconnects/failures after startup.
 
@@ -214,7 +223,7 @@ Restore order: close edge/inference/billing/payout circuits → stop old gateway
 
 | Stage/task | Required commands or checks | Depends on / parallelism | Done when |
 | --- | --- | --- | --- |
-| C0 — Validate contracts/config/secrets | `make contracts-check`, YAML/Compose/schema checks, secret scan including Git diff and generated artifacts | First | **Done when:** Contract drift, secret fixture or public wallet/Redis/Kafka port is rejected |
+| C0 — Validate contracts/config/secrets | Stage 2: `sh scripts/contracts-check.sh`; later: YAML/Compose/schema checks, secret scan including Git diff and generated artifacts | Stage 2 contract gate first; deployment checks join when their files exist | **Done when:** Contract drift and secret fixtures are rejected in Stage 2 CI; later infrastructure checks also reject malformed config or public wallet/Redis/Kafka ports |
 | C1 — Lint/typecheck/static analysis | Go fmt/vet/gosec; Rust fmt/clippy with denied warnings; frontend ESLint/Svelte/TypeScript checks | C0; language jobs parallel | **Done when:** All language jobs pass without unreviewed suppressions |
 | C2 — Test | Go unit/race; Rust workspace; frontend unit; Redis/Kafka/mock-node system tests and Playwright; privacy/parser corpus tests | C1; unit jobs parallel; integration needs built test artifacts | **Done when:** Shared success/error/accounting/access fixtures pass with isolated test volumes |
 | C3 — Audit dependencies/native inputs | `govulncheck ./...`, `cargo audit`, `npm audit --audit-level=high`; license/native llama.cpp review; scheduled parser fuzzing | C0; parallel with C1/C2; all required before build promotion | **Done when:** No unreviewed relevant vulnerability/license violation; valid exceptions have owner/expiry |
@@ -282,7 +291,8 @@ On a failed deployment, preserve service/ledger/wallet state, close affected cir
 
 ## Next actions
 
-- **IN1 (I0):** Pin versions/digests and implement configuration validation. **Done when:** clean-clone `make config-check` rejects absent production secrets and invalid network/model combinations.
+- **IN0 (Stage 2 / I0):** Run the existing contract checker in the pull-request workflow. **Done when:** contract/schema/fixture violations fail CI and the workflow remains independent of Docker and external services.
+- **IN1 (I0b):** Pin versions/digests and implement configuration validation. **Done when:** clean-clone `make config-check` rejects absent production secrets and invalid network/model combinations.
 - **IN2 (I1/I2):** Bring up private Compose and nginx with mock-node SSE. **Done when:** `make smoke && make network-check && make test-edge` passes.
 - **IN3 (I3):** Configure persistence/replica and consistent encrypted remote backups. **Done when:** a scratch restore passes `make restore-drill` and records measured RPO/RTO.
 - **IN4 (I5/I6):** Add blocking language/security pipeline and portable artifact builds. **Done when:** a deliberately bad audit/protocol fixture blocks promotion and baseline node bundles pass platform smoke.
@@ -290,6 +300,7 @@ On a failed deployment, preserve service/ledger/wallet state, close affected cir
 ## Changelog
 
 - v1, 2026-10-08: Define infrastructure topology, deployment/release ownership and I0–I7 gates.
+- v2, 2026-10-09: Add the Stage 2 contract-CI gate; distinguish it from unverified M0 integrations and the later Compose/deployment slices.
 
 ## Open risks
 
@@ -300,3 +311,4 @@ On a failed deployment, preserve service/ledger/wallet state, close affected cir
 - nginx buffering or temporary-body files can violate privacy even if application logs are clean; large/slow-stream sentinel tests are required.
 - Backup/signing/secret-store recovery depends on real operator access; an unrehearsed key recovery process can make encrypted backups unusable.
 - Custodial incident handling and mainnet legal eligibility need responsible operators and qualified review before real funds are accepted.
+- Stage 2 CI can prove contract/fixture consistency only; Redis, Kafka, tokenizer/model, SOCKS5h, wallet and container-network behavior remain open until their pinned integration probes run.
