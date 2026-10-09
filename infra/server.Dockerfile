@@ -7,7 +7,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gate
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/mock-node ./cmd/mock-node
 
 FROM alpine:3.24.2 AS runtime
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates wget
 COPY --from=build /out/gateway /usr/local/bin/cordova-gateway
 COPY --from=build /out/mock-node /usr/local/bin/cordova-mock-node
 USER 10001:10001
