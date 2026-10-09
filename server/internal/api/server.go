@@ -2,7 +2,6 @@
 package api
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"cordova/server/internal/domain"
 	"cordova/server/internal/inference"
 )
 
@@ -30,11 +30,12 @@ func New(apiKey string, provider inference.Provider) (http.Handler, error) {
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
-	requestID, err := newID()
+	requestIDValue, err := domain.NewID()
 	if err != nil {
 		http.Error(w, "request identifier unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	requestID := requestIDValue.String()
 	w.Header().Set("X-Request-ID", requestID)
 	w.Header().Set("X-Cordova-Mode", "mock")
 	w.Header().Set("X-Cordova-Usage", "synthetic-word-counts-not-billable")
@@ -87,16 +88,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.chat(w, r, requestID)
-}
-
-func newID() (string, error) {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", err
-	}
-	value[6] = (value[6] & 0x0f) | 0x40
-	value[8] = (value[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:]), nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

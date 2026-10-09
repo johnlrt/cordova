@@ -26,9 +26,23 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, requestID string) 
 	if req.MaxTokens != nil {
 		limit = *req.MaxTokens
 	}
+	parameters := inference.Parameters{Temperature: 0.7, TopP: 0.95}
+	if req.Temperature != nil {
+		parameters.Temperature = *req.Temperature
+	}
+	if req.TopP != nil {
+		parameters.TopP = *req.TopP
+	}
+	if req.Stop != nil {
+		parameters.Stop = append([]string(nil), (*req.Stop)...)
+	}
+	if req.Seed != nil {
+		seed := *req.Seed
+		parameters.Seed = &seed
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
-	input := inference.Request{Messages: req.Messages, MaxTokens: limit}
+	input := inference.Request{Messages: req.Messages, MaxTokens: limit, Parameters: parameters}
 	completionID := "chatcmpl-" + requestID
 	created := time.Now().Unix()
 	if !req.Stream {
