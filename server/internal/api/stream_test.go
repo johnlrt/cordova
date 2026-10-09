@@ -60,7 +60,7 @@ func TestStreamFlushAndClientCancellation(t *testing.T) {
 }
 
 func TestConcurrencyLimitReleasesCapacity(t *testing.T) {
-	started := make(chan struct{}, 4)
+	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	var once sync.Once
 	finish := func() { once.Do(func() { close(release) }) }
@@ -74,25 +74,24 @@ func TestConcurrencyLimitReleasesCapacity(t *testing.T) {
 		}
 	}))
 	var jobs sync.WaitGroup
-	for range 4 {
-		jobs.Add(1)
-		go func() {
-			defer jobs.Done()
-			call(h, "POST", "/v1/chat/completions", validBody, testKey)
-		}()
-	}
+	jobs.Add(1)
+	go func() {
+		defer jobs.Done()
+		call(h, "POST", "/v1/chat/completions", validBody, testKey)
+	}()
 	defer jobs.Wait()
 	defer finish()
-	for range 4 {
-		select {
-		case <-started:
-		case <-time.After(3 * time.Second):
-			t.Fatal("provider did not start")
-		}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	if call(h, "GET", "/healthz", "", "").Code != 200 || call(h, "GET", "/v1/models", "", testKey).Code != 200 {
+		t.Fatal("busy generation slot blocked health or model catalog")
 	}
 	w := call(h, "POST", "/v1/chat/completions", validBody, testKey)
 	if w.Code != 429 || w.Header().Get("Retry-After") != "2" {
-		t.Fatal("fifth concurrent request was not rejected")
+		t.Fatal("second concurrent request was not rejected")
 	}
 	finish()
 	jobs.Wait()
