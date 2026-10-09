@@ -1,0 +1,9 @@
+services:
+  gateway:
+    environment:
+      CORDOVA_ENV: development
+      CORDOVA_PUBLIC_ORIGIN: https://localhost:8443
+
+  edge:
+    environment:
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"

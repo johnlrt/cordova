@@ -3,8 +3,9 @@ import { getAccountJSON } from './account.ts';
 
 export interface UsageRow {
   request_id: string;
+  api_key_id: string;
   model_id: string;
-  status: 'accepted' | 'running' | 'settled' | 'refunded' | 'cancelled' | 'recovering';
+  status: 'completed' | 'accepted' | 'running' | 'settled' | 'refunded' | 'cancelled' | 'recovering';
   input_tokens: number;
   output_tokens: number;
   charged_piconero: string;
@@ -36,10 +37,10 @@ export function decodeUsagePage(value: unknown): UsagePage {
   }
   const ids = new Set<string>();
   const data = value.data.map((item: unknown): UsageRow => {
-    const keys = ['request_id', 'model_id', 'status', 'input_tokens', 'output_tokens', 'charged_piconero', 'latency_ms', 'created_at', 'finished_at'];
-    if (!record(item) || !exact(item, keys) || !uuid(item.request_id) || typeof item.model_id !== 'string' ||
+    const keys = ['request_id', 'api_key_id', 'model_id', 'status', 'input_tokens', 'output_tokens', 'charged_piconero', 'latency_ms', 'created_at', 'finished_at'];
+    if (!record(item) || !exact(item, keys) || !uuid(item.request_id) || !uuid(item.api_key_id) || typeof item.model_id !== 'string' ||
         !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(item.model_id) ||
-        !['accepted', 'running', 'settled', 'refunded', 'cancelled', 'recovering'].includes(String(item.status)) ||
+        !['completed', 'accepted', 'running', 'settled', 'refunded', 'cancelled', 'recovering'].includes(String(item.status)) ||
         !count(item.input_tokens) || !count(item.output_tokens) ||
         typeof item.charged_piconero !== 'string' || !/^(0|[1-9][0-9]*)$/.test(item.charged_piconero) ||
         BigInt(item.charged_piconero) > 9_000_000_000_000_000_000n ||
@@ -54,5 +55,5 @@ export function decodeUsagePage(value: unknown): UsagePage {
 }
 
 export async function fetchRecentUsage(signal: AbortSignal): Promise<UsagePage> {
-  return decodeUsagePage(await getAccountJSON('/api/usage?limit=5', signal));
+  return decodeUsagePage(await getAccountJSON('/api/usage', signal));
 }

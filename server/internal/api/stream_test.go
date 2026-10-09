@@ -124,3 +124,13 @@ func TestWriteErrorPropagates(t *testing.T) {
 		t.Fatal("write failure was swallowed")
 	}
 }
+
+func TestHeartbeatUsesAnSSEComment(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	if err := heartbeatEvent(recorder); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.Body.String(); got != ": keep-alive\n\n" {
+		t.Fatalf("unexpected SSE heartbeat %q", got)
+	}
+}
