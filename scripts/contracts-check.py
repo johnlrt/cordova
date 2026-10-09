@@ -198,9 +198,26 @@ def main() -> int:
         tokenizer = load_json(CONTRACTS / "internal/tokenizer.schema.json")
         if openapi.get("openapi") != "3.1.0":
             raise ContractError("openapi.yaml: expected OpenAPI 3.1.0")
-        expected_paths = {"/healthz", "/v1/models", "/v1/chat/completions"}
+        expected_paths = {
+            "/healthz", "/v1/models", "/v1/chat/completions",
+            "/api/auth/register", "/api/auth/login", "/api/auth/recover", "/api/auth/logout",
+            "/api/session", "/api/keys", "/api/keys/{id}", "/api/usage",
+            "/api/live-ticket", "/api/live",
+        }
         if set(openapi.get("paths", {})) != expected_paths:
-            raise ContractError("openapi.yaml: path inventory does not match the initial stage-1 API")
+            raise ContractError("openapi.yaml: route inventory differs from the implemented Stage 1 and M1 API")
+        required_m1_schemas = {
+            "Account", "RegisterRequest", "LoginRequest", "RecoverRequest", "SessionResponse",
+            "APIKeyCreateRequest", "APIKeyCreateResponse", "APIKey", "APIKeyList", "UsageRow",
+            "UsageList", "LiveTicketResponse",
+        }
+        if not required_m1_schemas.issubset(openapi.get("components", {}).get("schemas", {})):
+            raise ContractError("openapi.yaml: M1 account, key, usage or live-ticket schemas are incomplete")
+        live_security = openapi["paths"]["/api/live"]["get"].get("security", [])
+        if not any("SessionCookie" in requirement for requirement in live_security):
+            raise ContractError("openapi.yaml: dashboard live socket must use a session cookie")
+        if "/readyz" in openapi["paths"] or "/metrics" in openapi["paths"]:
+            raise ContractError("openapi.yaml: private readiness/metrics endpoints must not be public API routes")
         for path, item in openapi["paths"].items():
             for method, operation in item.items():
                 if method.lower() not in {"get", "post", "put", "patch", "delete"}:

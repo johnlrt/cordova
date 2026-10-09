@@ -179,6 +179,16 @@ func TestC2GenerationParametersReachProvider(t *testing.T) {
 	}
 }
 
+func TestInvalidProviderUsageCannotReturnSuccess(t *testing.T) {
+	provider := providerFunc(func(context.Context, inference.Request, func(string) error) (inference.Result, error) {
+		return inference.Result{FinishReason: "stop", Usage: inference.Usage{PromptTokens: -1, CompletionTokens: 2, TotalTokens: 1}}, nil
+	})
+	w := call(handler(t, provider), "POST", "/v1/chat/completions", validBody, testKey)
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), `"object":"chat.completion"`) {
+		t.Fatalf("invalid usage metadata returned success: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestC2GenerationDefaultsAndStopString(t *testing.T) {
 	var captured inference.Request
 	provider := providerFunc(func(ctx context.Context, req inference.Request, emit func(string) error) (inference.Result, error) {

@@ -58,7 +58,7 @@
 
   function statusLabel(status: string) {
     if (!ru) return status;
-    return ({ accepted: 'принят', running: 'выполняется', settled: 'завершён', refunded: 'возврат', cancelled: 'отменён', recovering: 'сверка' } as Record<string, string>)[status] ?? status;
+    return ({ completed: 'завершён', accepted: 'принят', running: 'выполняется', settled: 'рассчитан', refunded: 'возврат', cancelled: 'отменён', recovering: 'сверка' } as Record<string, string>)[status] ?? status;
   }
 
   function usageErrorText() {
@@ -86,13 +86,13 @@
     {#if resources.usageStatus === 'loading'}
       <p class="usage-message" role="status">{ru ? 'Загружаем подтверждённую историю…' : 'Loading authoritative request history…'}</p>
     {:else if resources.usageStatus === 'error' && !resources.usage}
-      <div class="usage-empty" role="status"><strong>{resources.usageError?.status === 404 ? (ru ? 'История пока не подключена на сервере' : 'Usage API is not available on this server yet') : usageErrorText()}</strong><p>{resources.usageError?.requestId ? `${ru ? 'ID запроса поддержки' : 'Support request ID'}: ${resources.usageError.requestId}` : (ru ? 'Фронтенд не подставляет тестовые данные. Повторите запрос, когда endpoint будет доступен.' : 'The frontend does not substitute demo data here. Retry when the endpoint is available.')}</p><button class="secondary" onclick={() => void resources.refreshUsage()}>{ru ? 'Повторить' : 'Retry'}</button></div>
+      <div class="usage-empty" role="status"><strong>{usageErrorText()}</strong><p>{resources.usageError?.requestId ? `${ru ? 'ID запроса поддержки' : 'Support request ID'}: ${resources.usageError.requestId}` : (ru ? 'Данные не подменяются демо-значениями. Повторите запрос позже.' : 'The frontend does not substitute demo data here. Retry shortly.')}</p><button class="secondary" onclick={() => void resources.refreshUsage()}>{ru ? 'Повторить' : 'Retry'}</button></div>
     {:else if resources.usage?.data.length}
       <div class="usage-table-wrap"><table class="usage-table"><thead><tr><th>{ru ? 'Модель' : 'Model'}</th><th>{ru ? 'Состояние' : 'Status'}</th><th>{ru ? 'Токены' : 'Tokens'}</th><th>{ru ? 'Время · локальная зона' : 'Time · local zone'}</th></tr></thead><tbody>
         {#each resources.usage.data as row (row.request_id)}<tr><td><strong>{row.model_id}</strong><small>#{row.request_id.slice(0, 8)}</small></td><td><span class="badge neutral">{statusLabel(row.status)}</span></td><td>{row.input_tokens.toLocaleString(ru ? 'ru-RU' : 'en')} in / {row.output_tokens.toLocaleString(ru ? 'ru-RU' : 'en')} out</td><td>{time(row.created_at)}</td></tr>{/each}
       </tbody></table></div>
     {:else}
-      <div class="usage-empty"><strong>{ru ? 'Запросов пока нет' : 'No requests yet'}</strong><p>{ru ? 'Когда появится usage API, здесь отобразятся статусы и метаданные. Тексты промптов не загружаются.' : 'When the usage API is available, request status and metadata will appear here. Prompt text is never loaded.'}</p></div>
+      <div class="usage-empty"><strong>{ru ? 'Запросов пока нет' : 'No requests yet'}</strong><p>{ru ? 'Выполните запрос с тестовым API-ключом, чтобы увидеть статус и метаданные. Тексты промптов не сохраняются в истории.' : 'Send a request with a test API key to see its status and metadata. Prompts are not stored in request history.'}</p></div>
     {/if}
   </section>
   <div class="account-grid"><article class="account-panel"><p class="eyebrow">{ru ? 'ПИЛОТ' : 'PILOT'}</p><h2>{ru ? 'Один хост. Один канал генерации.' : 'One host. One generation channel.'}</h2><p>{ru ? 'Пилот показывает mock-состояние шлюза и синтетический каталог. Он не заявляет о настоящем inference или измеренной мощности ускорителя.' : 'The pilot reports mock gateway health and a synthetic model catalog. It does not claim real inference or measured accelerator capacity.'}</p><a class="text-link" href="/pilot">{ru ? 'Открыть пилот ↗' : 'View pilot dashboard ↗'}</a></article><article class="account-panel"><p class="eyebrow">{ru ? 'ПРИВАТНОСТЬ' : 'PRIVACY'}</p><h2>{ru ? 'Узлы видят текст запроса' : 'Nodes can see request text'}</h2><p>{ru ? 'Не отправляйте секреты или данные, которые нельзя раскрыть обслуживающему узлу. Центральный сервер и доверенный tokenizer также обрабатывают текст в памяти.' : 'Do not submit secrets or data you cannot disclose to the serving node. The central server and trusted tokenizer also process text in memory.'}</p><a class="text-link" href="/">{ru ? 'Полное предупреждение ↗' : 'Read the full notice ↗'}</a></article></div>
