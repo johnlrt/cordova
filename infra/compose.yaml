@@ -34,7 +34,7 @@ services:
         condition: service_healthy
       mock-node:
         condition: service_healthy
-    networks: [front, private]
+    networks: [private]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -159,7 +159,7 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-    networks: [front]
+    networks: [front, private]
     read_only: true
     tmpfs: [/var/cache/nginx, /var/run]
     cap_drop: [ALL]
@@ -175,8 +175,7 @@ services:
       retries: 8
 
 networks:
-  front:
-    internal: true
+  front: {}
   private:
     internal: true
 

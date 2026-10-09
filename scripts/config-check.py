@@ -42,12 +42,21 @@ def main() -> int:
                 source = volume.get("source", "") if isinstance(volume, dict) else ""
                 if source == "/var/run/docker.sock" or "docker.sock" in source:
                     fail("Docker socket mounts are forbidden")
-        for network in config.get("networks", {}).values():
-            if not network.get("internal", False):
-                fail("all M1 networks must be internal")
-        private = config.get("networks", {}).get("private", {})
+        networks = config.get("networks", {})
+        front = networks.get("front", {})
+        private = networks.get("private", {})
+        if front.get("internal", False):
+            fail("the edge front network must reach the host-published loopback port")
         if private.get("internal") is not True:
             fail("Redis, Kafka and mock-node require an internal network")
+        service_networks = {name: set(service.get("networks", {})) for name, service in services.items()}
+        if service_networks.get("edge") != {"front", "private"}:
+            fail("the edge must bridge the loopback-published front and isolated private networks")
+        if service_networks.get("gateway") != {"private"}:
+            fail("the gateway must remain isolated from the host-facing front network")
+        for name in {"mock-node", "redis", "redpanda"}:
+            if service_networks.get(name) != {"private"}:
+                fail(f"{name} must attach only to the isolated private network")
 
         secret_names = ["app-pepper", "redis-password", "mock-node-token"]
         for name in secret_names:
@@ -82,7 +91,7 @@ def main() -> int:
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
         if ".local/" not in dockerignore or "**/node_modules/" not in dockerignore:
             fail("Docker build context must exclude secrets and installed dependencies")
-        print("PASS: versioned images, private networks, localhost-only edge, protected secrets and TLS identities")
+        print("PASS: versioned images, isolated private services, localhost-only edge, protected secrets and TLS identities")
         return 0
     except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
