@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"cordova/server/internal/domain"
@@ -45,6 +46,8 @@ type nodeService struct {
 	signingKey   ed25519.PrivateKey
 	verification ed25519.PublicKey
 	keyID        string
+	peerMu       sync.RWMutex
+	peers        map[string]*nodePeer
 }
 
 type nodeRecord struct {
@@ -97,7 +100,7 @@ func newNodeService(client *redis.Client, cfg Config) (*nodeService, error) {
 	keyDigest := sha256.Sum256(publicKey)
 	return &nodeService{redis: client, origin: strings.TrimRight(cfg.Origin, "/"), pepper: append([]byte(nil), cfg.Pepper...),
 		encryption: append([]byte(nil), cfg.NodeSecretEncryptionKey...), signingKey: privateKey, verification: publicKey,
-		keyID: hex.EncodeToString(keyDigest[:8])}, nil
+		keyID: hex.EncodeToString(keyDigest[:8]), peers: make(map[string]*nodePeer)}, nil
 }
 
 func (s *nodeService) verifier(purpose, value string) string {

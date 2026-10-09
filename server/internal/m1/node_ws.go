@@ -320,6 +320,9 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 	}); err != nil {
 		return
 	}
+	peer := newNodePeer(conn, identity, sessionID, outputSeq)
+	h.nodes.attachPeer(peer)
+	defer h.nodes.detachPeer(peer)
 	lastHeartbeat := now
 	var lastPong atomic.Int64
 	lastPong.Store(now.UnixNano())
@@ -365,13 +368,13 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 			return
 		}
 		if kind != websocket.TextMessage {
-			sendNodeWireError(conn, outputSeq, &sessionID, nil, "frame", "invalid_message", "Text frames are required.", false)
+			peer.sendError(nil, "frame", "invalid_message", "Text frames are required.", false)
 			nodeClose(conn, websocket.CloseProtocolError, "text frames required")
 			return
 		}
 		frame, err := decodeNodeWireEnvelope(data)
 		if err != nil || validateNodeEnvelope(frame, inputSeq, &sessionID, false) != nil {
-			sendNodeWireError(conn, outputSeq, &sessionID, nil, "frame", "invalid_message", "The node message is invalid.", false)
+			peer.sendError(nil, "frame", "invalid_message", "The node message is invalid.", false)
 			nodeClose(conn, websocket.ClosePolicyViolation, "invalid message")
 			return
 		}
@@ -383,26 +386,26 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 		digest := frame.Type + "\n" + string(frame.RequestID) + "\n" + string(frame.Payload) + "\n" + string(frame.Error)
 		if previous, exists := seen[frame.MessageID]; exists {
 			if previous != digest {
-				sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), frame.Type, "replayed_message", "This message identifier was reused.", false)
+				peer.sendError(nullableUUID(frame.RequestID), frame.Type, "replayed_message", "This message identifier was reused.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "replayed message")
 				return
 			}
 			reply, cached := replies[frame.MessageID]
 			if !cached {
-				sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), frame.Type, "replayed_message", "This message was already processed.", false)
+				peer.sendError(nullableUUID(frame.RequestID), frame.Type, "replayed_message", "This message was already processed.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "replayed message")
 				return
 			}
 			if reply.Type == "" {
 				continue
 			}
-			if writeNodeEnvelope(conn, &outputSeq, reply.Type, reply.RequestID, &sessionID, reply.Payload) != nil {
+			if peer.send(reply.Type, reply.RequestID, reply.Payload) != nil {
 				return
 			}
 			continue
 		}
 		if len(seen) >= maxNodeSessionMessages {
-			sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), frame.Type, "rate_limited", "Too many distinct messages arrived in one session.", true)
+			peer.sendError(nullableUUID(frame.RequestID), frame.Type, "rate_limited", "Too many distinct messages arrived in one session.", true)
 			nodeClose(conn, websocket.ClosePolicyViolation, "message limit")
 			return
 		}
@@ -410,12 +413,12 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 
 		current, currentErr := h.nodes.nodeSessionCurrent(ctx, identity, sessionID)
 		if currentErr != nil {
-			sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), frame.Type, "internal_error", "The node session is unavailable.", true)
+			peer.sendError(nullableUUID(frame.RequestID), frame.Type, "internal_error", "The node session is unavailable.", true)
 			nodeClose(conn, websocket.CloseInternalServerErr, "unavailable")
 			return
 		}
 		if !current {
-			sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), frame.Type, "stale_session", "A newer node session is active.", false)
+			peer.sendError(nullableUUID(frame.RequestID), frame.Type, "stale_session", "A newer node session is active.", false)
 			nodeClose(conn, 4001, "stale session")
 			return
 		}
@@ -427,7 +430,7 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 				decodeNodeModels(nodeObjectField(frame.Payload, "models"), &heartbeat.Models) != nil ||
 				!validNodeIDArray(nodeObjectField(frame.Payload, "active_leases")) || len(heartbeat.ActiveLeases) != 0 ||
 				!validNodeHardware(heartbeat.Hardware) || !validNodeModels(heartbeat.Models) {
-				sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), "heartbeat", "stale_lease", "The heartbeat contains unsupported active leases or invalid state.", false)
+				peer.sendError(nullableUUID(frame.RequestID), "heartbeat", "stale_lease", "The heartbeat contains unsupported active leases or invalid state.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid heartbeat")
 				return
 			}
@@ -444,19 +447,19 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 			ack := map[string]any{
 				"server_time": lastHeartbeat.Format(time.RFC3339Nano), "session_expires_at": expires.Format(time.RFC3339Nano),
 			}
-			if writeNodeEnvelope(conn, &outputSeq, "heartbeat.ack", nullableUUID(frame.RequestID), &sessionID, ack) != nil {
+			if peer.send("heartbeat.ack", nullableUUID(frame.RequestID), ack) != nil {
 				return
 			}
 			replies[frame.MessageID] = cachedNodeReply{Type: "heartbeat.ack", RequestID: nullableUUID(frame.RequestID), Payload: ack}
 		case "catalog.get":
 			var request nodeCatalogGetPayload
 			if decodeNodePayload(frame.Payload, &request, "known_version") != nil || !validNullableID(request.KnownVersion) || nullableUUID(frame.RequestID) == nil {
-				sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), "catalog.get", "invalid_message", "The catalog request is invalid.", false)
+				peer.sendError(nullableUUID(frame.RequestID), "catalog.get", "invalid_message", "The catalog request is invalid.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid catalog request")
 				return
 			}
 			snapshot := map[string]any{"version": nodeCatalogVersion, "models": []any{}}
-			if writeNodeEnvelope(conn, &outputSeq, "catalog.snapshot", nullableUUID(frame.RequestID), &sessionID, snapshot) != nil {
+			if peer.send("catalog.snapshot", nullableUUID(frame.RequestID), snapshot) != nil {
 				return
 			}
 			replies[frame.MessageID] = cachedNodeReply{Type: "catalog.snapshot", RequestID: nullableUUID(frame.RequestID), Payload: snapshot}
@@ -464,8 +467,14 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 			var model nodeModelStatePayload
 			if decodeNodePayload(frame.Payload, &model, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code") != nil ||
 				!validNodeModelState(model) {
-				sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), "model.state", "invalid_message", "The model state is invalid.", false)
+				peer.sendError(nullableUUID(frame.RequestID), "model.state", "invalid_message", "The model state is invalid.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid model state")
+				return
+			}
+			if requestID := nullableUUID(frame.RequestID); requestID != nil &&
+				(validateNodeReply(frame) != nil || !peer.hasPending(*requestID)) {
+				peer.sendError(requestID, "model.state", "stale_lease", "The model response is no longer pending.", false)
+				nodeClose(conn, websocket.ClosePolicyViolation, "unsolicited model response")
 				return
 			}
 			if err := h.nodes.recordNodeModelState(ctx, identity, sessionID, model, time.Now().UTC()); err != nil {
@@ -476,13 +485,20 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 				}
 				return
 			}
+			if nullableUUID(frame.RequestID) != nil {
+				if !peer.deliver(frame) {
+					peer.sendError(nullableUUID(frame.RequestID), "model.state", "stale_lease", "The model response is no longer pending.", false)
+					nodeClose(conn, websocket.ClosePolicyViolation, "unsolicited model response")
+					return
+				}
+			}
 			replies[frame.MessageID] = cachedNodeReply{}
 		case "goodbye":
 			var goodbye nodeGoodbyePayload
 			if decodeNodePayload(frame.Payload, &goodbye, "reason", "active_leases") != nil ||
 				!validNodeIDArray(nodeObjectField(frame.Payload, "active_leases")) ||
 				(goodbye.Reason != "shutdown" && goodbye.Reason != "upgrade") || len(goodbye.ActiveLeases) != 0 {
-				sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), "goodbye", "stale_lease", "The node cannot disconnect with unsupported active leases.", false)
+				peer.sendError(nullableUUID(frame.RequestID), "goodbye", "stale_lease", "The node cannot disconnect with unsupported active leases.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid goodbye")
 				return
 			}
@@ -504,10 +520,19 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid error frame")
 				return
 			}
+			if !peer.deliver(frame) {
+				peer.sendError(nullableUUID(frame.RequestID), "error", "stale_lease", "The node response is no longer pending.", false)
+				nodeClose(conn, websocket.ClosePolicyViolation, "unsolicited node response")
+				return
+			}
+			replies[frame.MessageID] = cachedNodeReply{}
 		default:
-			sendNodeWireError(conn, outputSeq, &sessionID, nullableUUID(frame.RequestID), frame.Type, "invalid_message", "The server does not accept this node message.", false)
-			nodeClose(conn, websocket.ClosePolicyViolation, "unsupported node message")
-			return
+			if validateNodeReply(frame) != nil || !peer.deliver(frame) {
+				peer.sendError(nullableUUID(frame.RequestID), frame.Type, "invalid_message", "The node response is invalid or no longer pending.", false)
+				nodeClose(conn, websocket.ClosePolicyViolation, "invalid or unsolicited node response")
+				return
+			}
+			replies[frame.MessageID] = cachedNodeReply{}
 		}
 	}
 }
