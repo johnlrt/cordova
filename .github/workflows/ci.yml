@@ -77,8 +77,46 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - run: npm run contracts:check
+      - run: python ../scripts/contracts-check.py
       - run: npm run check
-      - run: npm run test
+      - run: npm run check:browser
+      - run: npm run test:unit
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
       - run: npm run build
       - name: Dependency vulnerability check
         run: npm audit --audit-level=high
+  frontend-m1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install browser test dependencies
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Prepare isolated M1 stack
+        run: |
+          make bootstrap-dev
+          make config-check
+          # The generated files stay inside a mode-700 directory; make mounted test secrets readable by UID 10001.
+          chmod 0644 .local/*
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml up --build --wait
+      - name: Verify frontend auth and live usage through nginx
+        working-directory: frontend
+        env:
+          CORDOVA_M1_ORIGIN: https://localhost:8443
+        run: npm run test:m1
+      - name: Verify M1 request and edge acceptance flows
+        run: |
+          make smoke
+          make test-edge
+      - name: Stop CI stack
+        if: always()
+        run: docker compose -f infra/compose.yaml -f infra/compose.dev.yaml down

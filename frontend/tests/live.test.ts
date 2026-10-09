@@ -44,11 +44,11 @@ test('live reconnect delay is full-jitter bounded and never exceeds sixty second
 
 test('usage snapshots reject numeric money, extra fields and invalid states', () => {
   const row = {
-    request_id: resourceId, api_key_id: sessionId, model_id: 'cordova-chat-small-v1', status: 'settled', input_tokens: 4, output_tokens: 5,
-    charged_piconero: '0', latency_ms: null, created_at: '2026-10-09T10:00:00Z', finished_at: '2026-10-09T10:00:01Z'
+    request_id: resourceId, api_key_id: sessionId, model_id: 'cordova-chat-small-v1', status: 'completed', input_tokens: 4, output_tokens: 5,
+    charged_piconero: '0', latency_ms: 18, created_at: '2026-10-09T10:00:00Z', finished_at: '2026-10-09T10:00:01Z'
   };
-  assert.equal(decodeUsagePage({ data: [row], next_cursor: null }).data[0].status, 'settled');
-  assert.equal(decodeUsagePage({ data: [{ ...row, status: 'completed' }], next_cursor: null }).data[0].status, 'completed');
+  assert.equal(decodeUsagePage({ data: [row], next_cursor: null }).data[0].status, 'completed');
+  assert.equal(decodeUsagePage({ data: [{ ...row, status: 'settled' }], next_cursor: null }).data[0].status, 'settled');
   assert.throws(() => decodeUsagePage({ data: [{ ...row, api_key_id: 'not-a-uuid' }], next_cursor: null }), ApiFailure);
   assert.throws(() => decodeUsagePage({ data: [{ ...row, charged_piconero: 0 }], next_cursor: null }), ApiFailure);
   assert.throws(() => decodeUsagePage({ data: [{ ...row, status: 'unknown' }], next_cursor: null }), ApiFailure);

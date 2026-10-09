@@ -1,4 +1,6 @@
 import { ApiFailure } from '../api/client.ts';
+import { matchesLiveClientFrame } from '../api/generated/contracts.ts';
+import type { LiveClientFrame } from '../api/generated/contracts.ts';
 import { fetchLiveTicket, type SessionView } from '../api/account.ts';
 import { InvalidationDeduper } from './invalidation.ts';
 import { decodeLiveFrame, isFirstReadyFrame, isNextSequence, liveEvent, type LiveEvent } from './protocol.ts';
@@ -175,12 +177,16 @@ export class LiveConnection {
     }
   }
 
-  private send(type: string, payload: Record<string, unknown>, requestId: string | null = id(), sessionId: string | null = this.sessionId || null): string | null {
+  private send(type: LiveClientFrame['type'], payload: LiveClientFrame['payload'], requestId: string | null = id(), sessionId: string | null = this.sessionId || null): string | null {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return null;
     const envelope = {
       v: 1, type, message_id: id(), request_id: requestId, session_id: sessionId,
       seq: this.nextOutSequence++, sent_at: new Date().toISOString(), payload, error: null
     };
+    if (!matchesLiveClientFrame(envelope)) {
+      this.socket.close(1002, 'invalid client frame');
+      return null;
+    }
     this.socket.send(JSON.stringify(envelope));
     return requestId;
   }
