@@ -60,10 +60,18 @@ type mockRouter struct {
 	attempts []*mockAttempt
 	acquired int
 	lastExcl map[string]struct{}
+	routeErr []error
 }
 
 func (r *mockRouter) Acquire(_ context.Context, _ string, excluded map[string]struct{}, _ time.Time) (Attempt, error) {
 	r.lastExcl = excluded
+	if len(r.routeErr) > 0 {
+		err := r.routeErr[0]
+		r.routeErr = r.routeErr[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	for len(r.attempts) > 0 {
 		attempt := r.attempts[0]
 		r.attempts = r.attempts[1:]
@@ -187,6 +195,34 @@ func TestCoordinatorAbandonsRetryWindowWhenNoSecondOwnerExists(t *testing.T) {
 	}
 	if _, ok := ledger.Snapshot().Fingerprints["abandon:"+params.RequestID]; !ok {
 		t.Fatal("request abandonment was not journaled")
+	}
+}
+
+func TestCoordinatorPreservesModelRoutingErrorsBeforeReservation(t *testing.T) {
+	for _, routeErr := range []error{ErrModelWarming, ErrModelNotFound} {
+		t.Run(routeErr.Error(), func(t *testing.T) {
+			ledger, coordinator, params, input, _ := setupCoordinator(t, wordTokenizer{}, "hello world")
+			coordinator.router = &mockRouter{routeErr: []error{routeErr}}
+			if _, err := coordinator.Execute(context.Background(), params, input, false, nil); !errors.Is(err, routeErr) {
+				t.Fatalf("Execute() error = %v, want %v", err, routeErr)
+			}
+			if entries := ledger.Entries(); len(entries) != 1 {
+				t.Fatalf("routing error reserved funds: entries=%d", len(entries))
+			}
+		})
+	}
+}
+
+func TestCoordinatorRefundsRetryReservationWhenSecondRouteIsWarming(t *testing.T) {
+	ledger, coordinator, params, input, owner := setupCoordinator(t, wordTokenizer{}, "hello world")
+	first := &mockAttempt{owner: owner, runErr: errors.New("node disconnected")}
+	coordinator.router = &mockRouter{attempts: []*mockAttempt{first}, routeErr: []error{nil, ErrModelWarming}}
+	if _, err := coordinator.Execute(context.Background(), params, input, false, nil); !errors.Is(err, ErrModelWarming) {
+		t.Fatalf("Execute() error = %v, want model warming", err)
+	}
+	checkpoint := ledger.Snapshot().Requests[params.RequestID]
+	if checkpoint.Status != billing.RequestRefunded {
+		t.Fatalf("retry reservation remained open after route warming: %s", checkpoint.Status)
 	}
 }
 
