@@ -1,4 +1,4 @@
-import { messages, type Language } from '../i18n';
+import { messages, type Language } from '../i18n.ts';
 
 export interface Health { status: 'ok'; stage: string; mode: 'mock' }
 export interface Model {
