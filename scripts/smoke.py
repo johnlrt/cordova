@@ -37,7 +37,7 @@ def main() -> int:
 
         username = "smoke-" + uuid.uuid4().hex[:16]
         password = "Cordova-smoke-" + uuid.uuid4().hex
-        with request("/api/auth/register", data={"username": username, "password": password, "privacy_notice_version": "v1"}) as response:
+        with request("/api/auth/register", data={"username": username, "password": password, "privacy_notice_version": "privacy-v1"}) as response:
             if response.status != 201:
                 raise RuntimeError("registration returned an unexpected status")
             session = json.load(response)
