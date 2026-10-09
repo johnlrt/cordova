@@ -25,9 +25,19 @@ def main() -> int:
             fail("docker compose config failed; run make bootstrap-dev and inspect the Compose files")
         config = json.loads(result.stdout)
         services = config.get("services", {})
-        expected = {"gateway", "mock-node", "redis", "redpanda", "edge"}
+        expected = {"gateway", "mock-node", "redis", "redpanda", "usage-topic-init", "edge"}
         if set(services) != expected:
             fail("Compose service inventory does not match the M1 stack")
+        topic_init = services["usage-topic-init"]
+        if topic_init.get("entrypoint") != ["rpk"] or topic_init.get("command") != [
+            "topic", "create", "--if-not-exists", "--brokers", "redpanda:9092",
+            "--partitions", "1", "--replicas", "1", "cordova.account.usage.v1",
+        ]:
+            fail("the M1 usage topic must be explicitly provisioned with stable single-partition ordering")
+        topic_dependency = topic_init.get("depends_on", {}).get("redpanda", {})
+        gateway_topic_dependency = services["gateway"].get("depends_on", {}).get("usage-topic-init", {})
+        if topic_dependency.get("condition") != "service_healthy" or gateway_topic_dependency.get("condition") != "service_completed_successfully":
+            fail("the gateway must wait for successful usage topic provisioning")
         gateway_environment = services["gateway"].get("environment", {})
         if gateway_environment.get("CORDOVA_PRIVACY_NOTICE_VERSION") != "privacy-v1":
             fail("the gateway must use the current privacy notice version")
@@ -57,7 +67,7 @@ def main() -> int:
             fail("the edge must bridge the loopback-published front and isolated private networks")
         if service_networks.get("gateway") != {"private"}:
             fail("the gateway must remain isolated from the host-facing front network")
-        for name in {"mock-node", "redis", "redpanda"}:
+        for name in {"mock-node", "redis", "redpanda", "usage-topic-init"}:
             if service_networks.get(name) != {"private"}:
                 fail(f"{name} must attach only to the isolated private network")
 

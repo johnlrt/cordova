@@ -32,6 +32,8 @@ services:
         condition: service_healthy
       redpanda:
         condition: service_healthy
+      usage-topic-init:
+        condition: service_completed_successfully
       mock-node:
         condition: service_healthy
     networks: [private]
@@ -143,6 +145,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+
+  usage-topic-init:
+    image: redpandadata/redpanda:v24.3.17
+    entrypoint: [rpk]
+    command: [topic, create, --if-not-exists, --brokers, redpanda:9092, --partitions, "1", --replicas, "1", cordova.account.usage.v1]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
 
   edge:
     image: cordova-edge:0.1.0
