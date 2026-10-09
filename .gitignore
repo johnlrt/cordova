@@ -11,6 +11,8 @@ dist/
 node_modules/
 .svelte-kit/
 frontend/build/
+frontend/test-results/
+frontend/playwright-report/
 target/
 *.gguf
 *.log

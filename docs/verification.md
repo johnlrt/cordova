@@ -55,7 +55,7 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 
 ### Остальные проверки
 
-- `make contracts-check` прошёл после добавления C3 enrollment/auth/WS paths: 21 REST paths, 27 node WS types, 8 live WS types и 36 fixtures.
+- `make contracts-check` прошёл после объединения изменений OpenAPI из `main` и C3 enrollment/auth/WS paths: 21 REST paths, 27 node WS types, 8 live WS types и 56 fixtures.
 - Redis integration на временном Redis 8.10.2 с AOF/`appendfsync always` проверила enrollment, owner approval session/CSRF, challenge/token exchange, однократность JWT, C3 hello/welcome/catalog/heartbeat/model-state и reconnect fencing. Это не проверка полного запуска Go gateway вместе с Rust node.
 - `cd node && RUSTUP_TOOLCHAIN=stable cargo fmt --all -- --check && RUSTUP_TOOLCHAIN=stable cargo test --workspace --offline` прошёл: 14 Rust tests. Использован установленный `stable`, а не зафиксированный проектом Rust 1.96.0.
 - `make test-ledger-redis` прошла на временной Redis-сборке; Kafka replay, tokenizer parity, SOCKS5h и wallet stagenet проверки не подтверждены.

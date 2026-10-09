@@ -3,16 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24 <25" },
-  "overrides": { "cookie": "0.7.2" },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "overrides": {
+    "cookie": "0.7.2"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "contracts:generate": "node scripts/generate-contracts.mjs",
+    "contracts:check": "node scripts/generate-contracts.mjs --check",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "check:browser": "tsc --project ./tsconfig.browser.json",
+    "test:unit": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:browser": "playwright test",
+    "test:m1": "playwright test --config=playwright.m1.config.ts",
+    "test": "npm run test:unit"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.0",
     "@sveltejs/adapter-static": "3.0.10",
     "@sveltejs/kit": "2.70.3",
     "@sveltejs/vite-plugin-svelte": "6.2.4",
