@@ -1,7 +1,9 @@
 # Cordova — frontend agent plan
 
 **Goal:** Implement a clear account dashboard and public setup documentation for Cordova using TypeScript and Svelte.
-**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Owner:** frontend agent. **Status:** implementation queue; frontend code does not yet exist.
+**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Owner:** frontend agent. **Status:** first pilot slice implemented; account dashboard roadmap remains queued.
+
+**Pilot update (2026-10-09):** `frontend/` now provides a dark static SvelteKit shell with overview, declared single-host configuration, authenticated live mock catalog and API documentation. It uses the existing stage-1 Bearer API, not the future cookie/account API. No sign-up, account balances, node enrollment, payouts, inference playground, generated account contracts or live node telemetry exist yet. Health latency samples belong only to the current browser session. Scope and verified setup: [docs/frontend-pilot.md](docs/frontend-pilot.md). The remaining sections describe future work.
 
 Apply planiuer Core (pages and dependencies), Security (credentials and account data), Quality (typed components), and First-Run (real contract/browser checks). Skip none. Read [PLAN.md](PLAN.md) before implementation: it exclusively owns shared API/WS schemas, authentication, privacy statements, pricing, money types and milestone gates. This file owns routes, components, state, frontend verification and user-facing behavior. Do not redefine a shared contract here.
 

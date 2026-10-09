@@ -30,6 +30,7 @@ func main() {
 func run() error {
 	address := flag.String("listen", "127.0.0.1:8080", "HTTP listen address; put HTTPS in front before exposing it")
 	keyPath := flag.String("key-file", ".local/api-key.txt", "path to the local demo API key")
+	webDir := flag.String("web-dir", "", "optional frontend static build directory; never use the project root")
 	initKey := flag.Bool("init-key", false, "create a random local key without overwriting an existing file, then exit")
 	version := flag.Bool("version", false, "print the current implementation stage")
 	flag.Parse()
@@ -54,6 +55,12 @@ func run() error {
 	handler, err := api.New(key, inference.Mock{Delay: 40 * time.Millisecond})
 	if err != nil {
 		return err
+	}
+	if *webDir != "" {
+		handler, err = api.WithFrontend(handler, *webDir)
+		if err != nil {
+			return err
+		}
 	}
 	server := api.HTTPServer(*address, handler)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

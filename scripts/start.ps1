@@ -1,4 +1,4 @@
-param([string]$Listen = '127.0.0.1:8080', [switch]$Rebuild)
+param([string]$Listen = '127.0.0.1:8080', [switch]$Rebuild, [string]$WebDir = '')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $projectRoot
@@ -19,6 +19,11 @@ try {
         & $binary -init-key
         if ($LASTEXITCODE -ne 0) { throw 'Key initialization failed.' }
     }
-    & $binary -listen $Listen
+    $gatewayArguments = @('-listen', $Listen)
+    if (-not $WebDir -and (Test-Path -LiteralPath 'frontend/build/index.html')) {
+        $WebDir = 'frontend/build'
+    }
+    if ($WebDir) { $gatewayArguments += @('-web-dir', $WebDir) }
+    & $binary @gatewayArguments
     if ($LASTEXITCODE -ne 0) { throw 'Gateway exited with an error.' }
 } finally { Pop-Location }
