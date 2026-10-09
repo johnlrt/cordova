@@ -24,7 +24,8 @@ func New(apiKey string, provider inference.Provider) (http.Handler, error) {
 	if len(apiKey) < 32 || provider == nil {
 		return nil, fmt.Errorf("API key must have at least 32 characters and provider must be configured")
 	}
-	s := &Server{keyHash: sha256.Sum256([]byte(apiKey)), provider: provider, slots: make(chan struct{}, 4)}
+	// The single-host pilot admits one generation at a time.
+	s := &Server{keyHash: sha256.Sum256([]byte(apiKey)), provider: provider, slots: make(chan struct{}, 1)}
 	return http.HandlerFunc(s.serve), nil
 }
 

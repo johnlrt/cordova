@@ -1,10 +1,10 @@
-param([string]$Listen = '127.0.0.1:8080')
+param([string]$Listen = '127.0.0.1:8080', [switch]$Rebuild)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $projectRoot
 try {
     $binary = Join-Path $projectRoot 'bin/cordova-gateway.exe'
-    if (-not (Test-Path -LiteralPath $binary)) {
+    if ($Rebuild -or -not (Test-Path -LiteralPath $binary)) {
         if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
             throw 'Install Go 1.27.2, or extract the Windows release bundle with bin/cordova-gateway.exe.'
         }

@@ -1,7 +1,7 @@
 # Cordova — shared architecture and contracts
 
 **Goal:** Deliver a privacy-focused community inference network with an OpenAI-compatible API, accountable routing, and XMR funding and owner payouts.
-**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Status:** executable implementation plan; no Cordova implementation exists in the active workspace.
+**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Status:** original implementation roadmap; see `README.md` for implemented features. The user's updated single-host pilot conditions are recorded in [docs/deployment-pilot.md](docs/deployment-pilot.md).
 
 Apply planiuer guides: Core (scope and dependencies), Security (untrusted nodes and custodial money), Quality (three implementation languages), First-Run (protocol, tokenizer, persistence and wallet verification). Skip none. The request for exactly four files overrides the skill's single-document output: this file owns all shared decisions and contracts; the other three own implementation tasks. Preserve `.old/`; its school-platform plans are unrelated.
 
