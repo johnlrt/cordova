@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -188,6 +189,212 @@ func TestRedisJournalIntegrationRejectsWrongKeyTypeBeforeMutation(t *testing.T) 
 	if count, err := client.HLen(ctx, journal.operationsKey).Result(); err != nil || count != 0 {
 		t.Fatalf("wrong-type rejection wrote operation tombstones: count=%d err=%v", count, err)
 	}
+}
+
+func TestRedisJournalIntegrationFaultInjectedCrashBoundaries(t *testing.T) {
+	client := integrationRedisClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	journal := integrationJournal(t, client)
+	ledger, err := NewRedisLedger(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Recover(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	account, key, ownerOne, ownerTwo := testID(t), testID(t), testID(t), testID(t)
+	creditAmount, _ := domain.NewPiconero(1_000_000_000)
+	now := time.Now().UTC().Truncate(time.Second)
+	price := testPrice(t, 1_000_000, 2_000_000, 5_000)
+	cap, _ := domain.NewPiconero(1_000_000_000)
+
+	// The credit is durable, but the worker loses the response after WAITAOF.
+	creditID := "fault-boundary-credit"
+	creditOp := "test-credit:" + creditID
+	creditFaultFired := armJournalFault(journal, redisFaultAfterAOFBarrier, creditOp)
+	if _, err := ledger.CreditTest(ctx, account, creditID, creditAmount, now); !errors.Is(err, ErrJournalUncertain) {
+		t.Fatalf("credit response-loss error=%v", err)
+	}
+	if !creditFaultFired() {
+		t.Fatal("credit fault point was not reached")
+	}
+	journal.faultInjector = nil
+	ledger = restartIntegrationLedger(t, ctx, client, journal, now.Add(time.Second))
+	journal = ledger.journal
+	credit, err := ledger.CreditTest(ctx, account, creditID, creditAmount, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("idempotent credit replay failed: %v", err)
+	}
+	if balance, err := ledger.Balance(ctx, account); err != nil || balance.Available.Int64() != creditAmount.Int64() || balance.Reserved.Int64() != 0 {
+		t.Fatalf("credit replay changed balance: balance=%+v err=%v", balance, err)
+	}
+	if stored, err := ledger.Operation(ctx, creditOp); err != nil || stored.EntryHash != credit.EntryHash {
+		t.Fatalf("credit tombstone changed after replay: stored=%+v err=%v", stored, err)
+	}
+
+	newParams := func(requestID, attemptID, ownerID string, acceptedAt time.Time) ReserveParams {
+		return ReserveParams{RequestID: requestID, AttemptID: attemptID, ModelID: defaultModelID, AccountID: account, APIKeyID: key,
+			OwnerID: ownerID, InputTokens: 2, MaxOutputTokens: 10, DailySpendCap: cap, Price: price, AcceptedAt: acceptedAt}
+	}
+
+	// A crash after the Lua transaction but before its durability acknowledgement
+	// leaves an orphan reservation; startup recovery refunds it exactly once.
+	requestID, attemptID := testID(t), testID(t)
+	params := newParams(requestID, attemptID, ownerOne, now.Add(2*time.Second))
+	reserveFaultFired := armJournalFault(journal, redisFaultAfterAtomicAppend, "reserve:"+requestID+":"+attemptID)
+	if _, _, err := ledger.Reserve(ctx, params); !errors.Is(err, ErrJournalUncertain) {
+		t.Fatalf("post-append reserve error=%v", err)
+	}
+	if !reserveFaultFired() {
+		t.Fatal("reserve fault point was not reached")
+	}
+	journal.faultInjector = nil
+	ledger = restartIntegrationLedger(t, ctx, client, journal, now.Add(3*time.Second))
+	journal = ledger.journal
+	request, _, err := ledger.Request(ctx, requestID)
+	if err != nil || request.Status != RequestRefunded {
+		t.Fatalf("orphan reserve recovery status=%s err=%v", request.Status, err)
+	}
+	if balance, err := ledger.Balance(ctx, account); err != nil || balance.Available.Int64() != creditAmount.Int64() || balance.Reserved.Int64() != 0 {
+		t.Fatalf("orphan reserve leaked funds: balance=%+v err=%v", balance, err)
+	}
+
+	// A lost refund response must close the abandoned retry window on restart.
+	refundRequest, refundAttempt := testID(t), testID(t)
+	params = newParams(refundRequest, refundAttempt, ownerOne, now.Add(4*time.Second))
+	if _, _, err := ledger.Reserve(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	refundFaultFired := armJournalFault(journal, redisFaultAfterAOFBarrier, "refund:"+refundRequest+":"+refundAttempt)
+	if _, err := ledger.FailAttempt(ctx, refundRequest, refundAttempt, true, now.Add(5*time.Second)); !errors.Is(err, ErrJournalUncertain) {
+		t.Fatalf("refund response-loss error=%v", err)
+	}
+	if !refundFaultFired() {
+		t.Fatal("refund fault point was not reached")
+	}
+	journal.faultInjector = nil
+	ledger = restartIntegrationLedger(t, ctx, client, journal, now.Add(6*time.Second))
+	journal = ledger.journal
+	request, _, err = ledger.Request(ctx, refundRequest)
+	if err != nil || request.Status != RequestRefunded {
+		t.Fatalf("retry-window recovery status=%s err=%v", request.Status, err)
+	}
+	if balance, err := ledger.Balance(ctx, account); err != nil || balance.Available.Int64() != creditAmount.Int64() || balance.Reserved.Int64() != 0 {
+		t.Fatalf("refund recovery leaked funds: balance=%+v err=%v", balance, err)
+	}
+
+	// A committed settlement remains terminal when the response is lost.
+	settleRequest, settleAttempt := testID(t), testID(t)
+	params = newParams(settleRequest, settleAttempt, ownerOne, now.Add(7*time.Second))
+	reservation, _, err := ledger.Reserve(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settleFaultFired := armJournalFault(journal, redisFaultAfterAOFBarrier, "settle:"+settleRequest)
+	if _, err := ledger.Settle(ctx, settleRequest, settleAttempt, 3, false, now.Add(8*time.Second)); !errors.Is(err, ErrJournalUncertain) {
+		t.Fatalf("settlement response-loss error=%v", err)
+	}
+	if !settleFaultFired() {
+		t.Fatal("settlement fault point was not reached")
+	}
+	journal.faultInjector = nil
+	ledger = restartIntegrationLedger(t, ctx, client, journal, now.Add(9*time.Second))
+	journal = ledger.journal
+	request, _, err = ledger.Request(ctx, settleRequest)
+	settledQuote, quoteErr := CalculateQuote(2, 3, 10, price, false)
+	if err != nil || quoteErr != nil || request.Status != RequestSettled {
+		t.Fatalf("settlement recovery status=%s quote_err=%v err=%v", request.Status, quoteErr, err)
+	}
+	if balance, err := ledger.Balance(ctx, account); err != nil || balance.Available.Int64() != creditAmount.Int64()-settledQuote.ActualCost.Int64() || balance.Reserved.Int64() != 0 || reservation.Amount == "" {
+		t.Fatalf("settlement recovery balance=%+v err=%v", balance, err)
+	}
+
+	// Cancellation applies the durable client-visible prefix once.
+	cancelRequest, cancelAttempt := testID(t), testID(t)
+	params = newParams(cancelRequest, cancelAttempt, ownerTwo, now.Add(10*time.Second))
+	if _, _, err := ledger.Reserve(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	cancelFaultFired := armJournalFault(journal, redisFaultAfterAOFBarrier, "cancel:"+cancelRequest)
+	if _, err := ledger.Settle(ctx, cancelRequest, cancelAttempt, 1, true, now.Add(11*time.Second)); !errors.Is(err, ErrJournalUncertain) {
+		t.Fatalf("cancel response-loss error=%v", err)
+	}
+	if !cancelFaultFired() {
+		t.Fatal("cancellation fault point was not reached")
+	}
+	journal.faultInjector = nil
+	ledger = restartIntegrationLedger(t, ctx, client, journal, now.Add(12*time.Second))
+	journal = ledger.journal
+	request, _, err = ledger.Request(ctx, cancelRequest)
+	cancelQuote, quoteErr := CalculateQuote(2, 1, 10, price, true)
+	if err != nil || quoteErr != nil || request.Status != RequestCancelled {
+		t.Fatalf("cancellation recovery status=%s quote_err=%v err=%v", request.Status, quoteErr, err)
+	}
+	if balance, err := ledger.Balance(ctx, account); err != nil || balance.Available.Int64() != creditAmount.Int64()-settledQuote.ActualCost.Int64()-cancelQuote.ActualCost.Int64() || balance.Reserved.Int64() != 0 {
+		t.Fatalf("cancellation recovery balance=%+v err=%v", balance, err)
+	}
+
+	// If the zero-value abandon record is committed before a crash, replay does
+	// not append a second terminal record or change any balance.
+	abandonRequest, abandonAttempt := testID(t), testID(t)
+	params = newParams(abandonRequest, abandonAttempt, ownerOne, now.Add(13*time.Second))
+	if _, _, err := ledger.Reserve(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.FailAttempt(ctx, abandonRequest, abandonAttempt, true, now.Add(14*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	abandonFaultFired := armJournalFault(journal, redisFaultAfterAtomicAppend, "abandon:"+abandonRequest)
+	if _, err := ledger.AbandonRetry(ctx, abandonRequest, now.Add(15*time.Second)); !errors.Is(err, ErrJournalUncertain) {
+		t.Fatalf("abandon post-append error=%v", err)
+	}
+	if !abandonFaultFired() {
+		t.Fatal("abandon fault point was not reached")
+	}
+	journal.faultInjector = nil
+	ledger = restartIntegrationLedger(t, ctx, client, journal, now.Add(16*time.Second))
+	journal = ledger.journal
+	request, _, err = ledger.Request(ctx, abandonRequest)
+	if err != nil || request.Status != RequestRefunded {
+		t.Fatalf("abandon recovery status=%s err=%v", request.Status, err)
+	}
+	if err := ledger.journal.Verify(ctx); err != nil {
+		t.Fatalf("fault-boundary journal replay failed: %v", err)
+	}
+}
+
+func armJournalFault(journal *RedisJournal, stage redisJournalFaultStage, operationID string) func() bool {
+	fired := false
+	journal.faultInjector = func(actualStage redisJournalFaultStage, actualOperationID string) error {
+		if !fired && actualStage == stage && actualOperationID == operationID {
+			fired = true
+			return errors.New("injected worker crash")
+		}
+		return nil
+	}
+	return func() bool { return fired }
+}
+
+func restartIntegrationLedger(t *testing.T, ctx context.Context, client *redis.Client, previous *RedisJournal, at time.Time) *RedisLedger {
+	t.Helper()
+	journal, err := NewRedisJournal(client, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.stream, journal.outbox, journal.headKey = previous.stream, previous.outbox, previous.headKey
+	journal.balancesKey, journal.operationsKey, journal.requestsKey = previous.balancesKey, previous.operationsKey, previous.requestsKey
+	journal.capsKey, journal.barrierKey, journal.usagePendingKey = previous.capsKey, previous.barrierKey, previous.usagePendingKey
+	ledger, err := NewRedisLedger(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Recover(ctx, at); err != nil {
+		t.Fatalf("restart recovery failed: %v", err)
+	}
+	return ledger
 }
 
 func integrationRedisClient(t *testing.T) *redis.Client {

@@ -61,7 +61,15 @@ type RedisJournal struct {
 	capsKey         string
 	barrierKey      string
 	usagePendingKey string
+	faultInjector   func(redisJournalFaultStage, string) error
 }
+
+type redisJournalFaultStage string
+
+const (
+	redisFaultAfterAtomicAppend redisJournalFaultStage = "after_atomic_append"
+	redisFaultAfterAOFBarrier   redisJournalFaultStage = "after_aof_barrier"
+)
 
 func NewRedisJournal(client *redis.Client, requireReplica bool) (*RedisJournal, error) {
 	if client == nil {
@@ -240,12 +248,25 @@ func (j *RedisJournal) append(ctx context.Context, entry Entry, requestID string
 		default:
 			return Entry{}, j.markUncertain(ErrInvalidOperation)
 		}
+		if err := j.injectFault(redisFaultAfterAtomicAppend, entry.OperationID); err != nil {
+			return Entry{}, j.markUncertain(err)
+		}
 		if err := j.waitAOF(ctx, conn); err != nil {
+			return Entry{}, j.markUncertain(err)
+		}
+		if err := j.injectFault(redisFaultAfterAOFBarrier, entry.OperationID); err != nil {
 			return Entry{}, j.markUncertain(err)
 		}
 		return entry, nil
 	}
 	return Entry{}, ErrJournalConflict
+}
+
+func (j *RedisJournal) injectFault(stage redisJournalFaultStage, operationID string) error {
+	if j.faultInjector == nil {
+		return nil
+	}
+	return j.faultInjector(stage, operationID)
 }
 
 func (j *RedisJournal) waitAOF(ctx context.Context, conn *redis.Conn) error {
