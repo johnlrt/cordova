@@ -63,16 +63,27 @@ test('M1 account dashboard receives real usage invalidation and isolates account
         stream_options: { include_usage: true }
       })
     });
+    const body = await completion.text();
+    let completionErrorCode = '';
+    if (completion.status >= 400) {
+      try {
+        const error = JSON.parse(body) as { error?: { code?: string } };
+        completionErrorCode = error.error?.code ?? '';
+      } catch {
+        completionErrorCode = 'invalid_error_response';
+      }
+    }
     return {
       keyStatus: keyResponse.status,
       completionStatus: completion.status,
+      completionErrorCode,
       requestId: completion.headers.get('X-Request-ID') ?? '',
-      body: await completion.text()
+      body
     };
   }, { csrfToken, prompt });
 
   expect(result.keyStatus).toBe(201);
-  expect(result.completionStatus).toBe(200);
+  expect(result.completionStatus, `chat completion error code: ${result.completionErrorCode || 'missing'}`).toBe(200);
   expect(result.requestId).toMatch(/^[0-9a-f-]{36}$/i);
   expect(result.body).toContain('[DONE]');
   expect(result.body).toContain('"usage"');
