@@ -10,7 +10,7 @@ async function register(page: Page, username: string) {
   );
   await page.getByLabel('I have read and accept the privacy notice.').check();
   await page.getByLabel('Username').fill(username);
-  await page.getByLabel('Password').fill(password);
+  await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
 
