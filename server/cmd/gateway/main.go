@@ -34,8 +34,15 @@ func run() error {
 	version := flag.Bool("version", false, "print the current implementation stage")
 	flag.Parse()
 	if *version {
-		fmt.Println("Cordova stage 1 / mock executor / no AI inference or billing")
+		if m1Mode() {
+			fmt.Println("Cordova M1 mock slice / test credits only / no real model or billing")
+		} else {
+			fmt.Println("Cordova Stage 1 mock API / synthetic word counts / no real model or billing")
+		}
 		return nil
+	}
+	if m1Mode() {
+		return runM1(*address)
 	}
 	if *initKey {
 		return createKey(*keyPath)
@@ -75,6 +82,10 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+func m1Mode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("CORDOVA_M1_MODE")), "true") || strings.TrimSpace(os.Getenv("CORDOVA_M1_MODE")) == "1"
 }
 
 func createKey(path string) error {

@@ -1,4 +1,4 @@
-name: Stage 1 checks
+name: Cordova checks
 on:
   push:
   pull_request:
@@ -20,4 +20,47 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race -count=1 ./...
-      - run: go build ./cmd/gateway
+      - run: go build ./cmd/gateway ./cmd/mock-node
+      - name: Dependency vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check REST, WebSocket, tokenizer schemas and fixtures
+        run: sh scripts/contracts-check.sh
+  node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Test the Rust node CLI and protocol
+        run: cargo test --locked --workspace
+      - name: Lint the Rust node
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Audit Rust dependencies
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file Cargo.lock
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test
+      - run: npm run build
+      - name: Dependency vulnerability check
+        run: npm audit --audit-level=high

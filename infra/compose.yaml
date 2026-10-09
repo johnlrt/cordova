@@ -1,0 +1,190 @@
+name: cordova-m1
+
+services:
+  gateway:
+    image: cordova-gateway:0.1.0
+    build:
+      context: ..
+      dockerfile: infra/server.Dockerfile
+      target: gateway
+    environment:
+      CORDOVA_M1_MODE: "true"
+      CORDOVA_ENV: development
+      CORDOVA_PUBLIC_ORIGIN: https://localhost:8443
+      CORDOVA_PRIVACY_NOTICE_VERSION: v1
+      CORDOVA_REDIS_URL: redis://redis:6379/0
+      CORDOVA_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      CORDOVA_KAFKA_BROKERS: redpanda:9092
+      CORDOVA_MOCK_NODE_URL: wss://mock-node:8090/ws
+      CORDOVA_MOCK_NODE_TOKEN_FILE: /run/secrets/mock_node_token
+      CORDOVA_MOCK_NODE_CA_FILE: /run/secrets/dev_ca
+      CORDOVA_APP_PEPPER_FILE: /run/secrets/app_pepper
+      CORDOVA_TRUST_PROXY: "true"
+    secrets:
+      - app_pepper
+      - redis_password
+      - mock_node_token
+      - source: dev_ca
+        target: dev_ca
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      mock-node:
+        condition: service_healthy
+    networks: [front, private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:8080/readyz | grep -q 'ready'"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+
+  mock-node:
+    image: cordova-mock-node:0.1.0
+    build:
+      context: ..
+      dockerfile: infra/server.Dockerfile
+      target: mock-node
+    environment:
+      CORDOVA_MOCK_NODE_TOKEN_FILE: /run/secrets/mock_node_token
+      CORDOVA_MOCK_NODE_TLS_CERT: /run/secrets/mock_node_cert
+      CORDOVA_MOCK_NODE_TLS_KEY: /run/secrets/mock_node_key
+      CORDOVA_MOCK_NODE_LISTEN: :8090
+    secrets:
+      - mock_node_token
+      - source: mock_node_cert
+        target: mock_node_cert
+      - source: mock_node_key
+        target: mock_node_key
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "wget --no-check-certificate -qO- https://127.0.0.1:8090/healthz >/dev/null"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+
+  redis:
+    image: redis:7.4.2-alpine3.21
+    command: [sh, -c, "exec redis-server --appendonly yes --appendfsync everysec --requirepass \"$$(cat /run/secrets/redis_password)\""]
+    secrets: [redis_password]
+    volumes: [redis-data:/data]
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.17
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --memory
+      - 768M
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - internal://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092
+      - --set
+      - redpanda.auto_create_topics_enabled=true
+    volumes: [redpanda-data:/var/lib/redpanda/data]
+    networks: [private]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, rpk, cluster, health, --brokers, redpanda:9092]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  edge:
+    image: cordova-edge:0.1.0
+    build:
+      context: ..
+      dockerfile: infra/edge.Dockerfile
+    ports:
+      - 127.0.0.1:8443:8443
+    secrets:
+      - source: edge_cert
+        target: edge_cert
+      - source: edge_key
+        target: edge_key
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks: [front]
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "wget --no-check-certificate -qO- https://127.0.0.1:8443/healthz | grep -q 'm1'"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+
+networks:
+  front:
+    internal: true
+  private:
+    internal: true
+
+volumes:
+  redis-data:
+  redpanda-data:
+
+secrets:
+  app_pepper:
+    file: ../.local/app-pepper
+  redis_password:
+    file: ../.local/redis-password
+  mock_node_token:
+    file: ../.local/mock-node-token
+  dev_ca:
+    file: ../.local/dev-ca.crt
+  edge_cert:
+    file: ../.local/edge.crt
+  edge_key:
+    file: ../.local/edge.key
+  mock_node_cert:
+    file: ../.local/mock-node.crt
+  mock_node_key:
+    file: ../.local/mock-node.key

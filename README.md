@@ -1,64 +1,49 @@
-# Cordova — первая часть
+# Cordova
 
-Запускаемый Go API для будущей сети AI-нод. **Сейчас реализован этап 1: HTTP/SSE и синтетический исполнитель. Настоящая AI-модель пока не подключена.** MacBook и GPU для проверки этого этапа не нужны.
+Cordova is a private mesh inference project. The repository now has the first complete **M1 mock-node slice**: HTTPS edge → Go gateway → private WSS mock node → SSE, with account-scoped metadata persisted through Redis and Kafka into the dashboard.
 
-Работают:
+M1 uses synthetic text and word counts. It creates no real model tokens, charges, deposits, or payouts. The Rust `cordova-node` CLI and llama.cpp runner are in the repository, but real-node enrollment, routing, and inference are later milestones and are not connected to the M1 gateway.
 
-- `GET /healthz` — проверка процесса.
-- `GET /v1/models` — каталог за API-ключом.
-- `POST /v1/chat/completions` — обычный JSON или поток SSE в формате text Chat Completions.
-- Валидация, ограничения размера и конкурентности, отмена при отключении клиента, безопасные ошибки.
-- Скрипты запуска, тесты, GitHub CI и понятная точка подключения будущего исполнителя.
+## Run M1 locally
 
-Все ответы помечены `X-Cordova-Mode: mock`; текст начинается с `[MOCK]`. Поле `usage` содержит **синтетические количества слов для тестов транспорта**, а не токены модели. Денежных списаний и выплат нет. Этот этап не означает завершение M1 из полного плана.
-
-## Быстрый запуск на Windows
-
-Требуется Go **1.27.2** либо готовый Windows bundle из Releases. В PowerShell из корня проекта:
-
-```powershell
-./scripts/start.ps1
-```
-
-Скрипт соберёт сервер, если готового бинарника нет, и создаст случайный ключ в `.local/api-key.txt`. Уже созданный ключ сохраняется. Если политика PowerShell запрещает скрипт, используйте прямые команды из [инструкции запуска](docs/stage-1.md).
-
-Во втором PowerShell:
-
-```powershell
-./scripts/smoke.ps1
-```
-
-Ожидается `PASS: health, authenticated model catalog and complete mock SSE response.`
-
-Для просмотра частей ответа по мере поступления:
-
-```powershell
-$demoKey = (Get-Content -LiteralPath '.local/api-key.txt' -Raw).Trim()
-$payload = '{"model":"cordova-chat-small-v1","messages":[{"role":"user","content":"Hello"}],"stream":true,"stream_options":{"include_usage":true}}'
-$payload | curl.exe -N http://127.0.0.1:8080/v1/chat/completions -H "Authorization: Bearer $demoKey" -H 'Content-Type: application/json' --data-binary '@-'
-```
-
-## Linux/macOS
-
-С установленным Go 1.27.2:
+Requirements: Docker Compose v2, OpenSSL, Python 3, and `make`.
 
 ```sh
-sh scripts/start.sh
+make bootstrap-dev
+make config-check
+make up
+make smoke
+make network-check
 ```
 
-Адрес по умолчанию — `http://127.0.0.1:8080`. На `/` интерфейса ещё нет; проверяйте `/healthz` и API. Публичное HTTPS-демо появится в отдельном этапе.
+The browser edge is [https://localhost:8443](https://localhost:8443). Trust `.local/dev-ca.crt` in your local browser or OS before using the dashboard. The generated private keys and application secrets stay under `.local/`, which is ignored by Git and excluded from Docker build contexts.
 
-## Rust-нода и Stage 2
+Register an account, save the one-time recovery codes, and create a test API key from the dashboard. The key is shown once. The API guide is available at `/docs/api`.
 
-В [инструкции Rust-ноды](docs/node-setup.md) описаны CLI, настройка llama.cpp и текущие границы интеграции. Gateway всё ещё отвечает через `inference.Mock`, который игнорирует параметры генерации и выдаёт синтетический текст; серверные enrollment и node WebSocket endpoints пока отсутствуют. Контракты backend и C2-параметры запроса описаны в [текущем срезе Stage 2](docs/stage-2.md).
+`make down` stops the containers but keeps the local Redis and Kafka volumes. The stack publishes only `127.0.0.1:8443`; Redis, Kafka, the Go gateway, and the mock WSS node stay on private Compose networks. No wallet or Docker socket is mounted.
 
-## Другу, который продолжит работу
+## Checks
 
-1. Получить доступ к приватному репозиторию и клонировать его.
-2. Прочитать [текущий объём](docs/stage-1.md), затем исходный `PLAN.md`.
-3. Выполнить `cd server`, `go test ./...`, `go vet ./...`.
-4. Делать изменения в своей ветке и присылать Pull Request.
+```sh
+make contracts-check
+make config-check
+make test-protocol
+cd frontend && npm ci && npm run check && npm run test && npm run build
+cd ../server && go fmt ./... && go test -race -count=1 ./... && go vet ./... && go build ./cmd/gateway ./cmd/mock-node
+```
 
-Следующий backend-шаг по плану — завершить B0: полные REST/WS-контракты и проверочные spikes. Затем реализовать auth и mock-node вертикальный срез B1/B2. Проверка llama.cpp на RTX 3050 4 GB и подключение реальной ноды остаются отдельными воротами до допуска настоящей модели. Текущий `inference.Provider` отделяет API от исполнителя.
+After `make up`, run `make smoke`, `make network-check`, and `make test-edge` for the local Redis/Kafka, TLS edge, SSE, account projection, and C4 WebSocket path. CI runs Go, frontend, and contract checks without Docker or service credentials.
 
-Полный замысел: [общая архитектура](PLAN.md), [backend/Rust](PLAN-back.md), [frontend](PLAN-front.md), [инфраструктура](PLAN-infra.md). Эти планы описывают дальнейшую работу, а не уже готовые возможности.
+The local M1 stack is development-only. Image tags are version-pinned; immutable registry digests and external M0 probes remain release gates. See [M1 implementation notes](docs/stage-2.md) for the remaining integration gaps.
+
+## Stage 1 fallback
+
+The original standalone mock HTTP/SSE server remains available for the smaller Stage 1 smoke test. Read [docs/stage-1.md](docs/stage-1.md). It does not include account sessions, the dashboard, Redis, Kafka, or the WSS mock-node path.
+
+## Project plans
+
+- [Shared architecture and contracts](PLAN.md)
+- [Backend and Rust node work](PLAN-back.md)
+- [Frontend work](PLAN-front.md)
+- [Infrastructure and release work](PLAN-infra.md)
+- [M1 implementation notes](docs/stage-2.md)
