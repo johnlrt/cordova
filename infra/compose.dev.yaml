@@ -1,4 +1,9 @@
 services:
+  redis:
+    # Keep the M1/dev Redis AOF on the writable tmpfs. The production compose
+    # file keeps its persistent /data volume and its durability settings.
+    command: [sh, -c, "exec redis-server --dir /tmp --appendonly yes --appendfsync everysec --requirepass \"$$(cat /run/secrets/redis_password)\""]
+
   gateway:
     environment:
       CORDOVA_ENV: development
