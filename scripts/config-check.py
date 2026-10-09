@@ -29,10 +29,14 @@ def main() -> int:
         if set(services) != expected:
             fail("Compose service inventory does not match the M1 stack")
         topic_init = services["usage-topic-init"]
-        if topic_init.get("entrypoint") != ["rpk"] or topic_init.get("command") != [
-            "topic", "create", "--if-not-exists", "--brokers", "redpanda:9092",
-            "--partitions", "1", "--replicas", "1", "cordova.account.usage.v1",
-        ]:
+        topic_command = topic_init.get("command", [])
+        required_topic_steps = [
+            "rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092",
+            "rpk topic create --brokers redpanda:9092 --partitions 1 --replicas 1 cordova.account.usage.v1",
+        ]
+        if topic_init.get("entrypoint") != ["/bin/sh", "-ec"] or len(topic_command) != 1:
+            fail("the M1 usage topic must be explicitly provisioned with stable single-partition ordering")
+        if any(step not in topic_command[0] for step in required_topic_steps):
             fail("the M1 usage topic must be explicitly provisioned with stable single-partition ordering")
         topic_dependency = topic_init.get("depends_on", {}).get("redpanda", {})
         gateway_topic_dependency = services["gateway"].get("depends_on", {}).get("usage-topic-init", {})

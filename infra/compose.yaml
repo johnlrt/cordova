@@ -148,8 +148,11 @@ services:
 
   usage-topic-init:
     image: redpandadata/redpanda:v24.3.17
-    entrypoint: [rpk]
-    command: [topic, create, --if-not-exists, --brokers, redpanda:9092, --partitions, "1", --replicas, "1", cordova.account.usage.v1]
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - >-
+        rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092 >/dev/null 2>&1 ||
+        rpk topic create --brokers redpanda:9092 --partitions 1 --replicas 1 cordova.account.usage.v1
     depends_on:
       redpanda:
         condition: service_healthy
