@@ -201,7 +201,7 @@ def main() -> int:
         expected_paths = {
             "/healthz", "/v1/models", "/v1/chat/completions",
             "/api/auth/register", "/api/auth/login", "/api/auth/recover", "/api/auth/logout",
-            "/api/session", "/api/keys", "/api/keys/{id}", "/api/usage",
+            "/api/session", "/api/keys", "/api/keys/{id}", "/api/usage", "/api/billing/balance", "/api/requests/{id}",
             "/api/live-ticket", "/api/live",
         }
         if set(openapi.get("paths", {})) != expected_paths:
@@ -209,7 +209,7 @@ def main() -> int:
         required_m1_schemas = {
             "Account", "RegisterRequest", "LoginRequest", "RecoverRequest", "SessionResponse",
             "APIKeyCreateRequest", "APIKeyCreateResponse", "APIKey", "APIKeyList", "UsageRow",
-            "UsageList", "LiveTicketResponse",
+            "UsageList", "LiveTicketResponse", "Balance", "RequestStatus",
         }
         if not required_m1_schemas.issubset(openapi.get("components", {}).get("schemas", {})):
             raise ContractError("openapi.yaml: M1 account, key, usage or live-ticket schemas are incomplete")

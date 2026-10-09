@@ -3,7 +3,7 @@
   "info": {
     "title": "Cordova public API",
     "version": "1.0.0",
-    "description": "Implemented M1 mock-node slice. Account data and usage metadata are persisted; requests use synthetic test credits only. No real model inference or payments are active."
+    "description": "Implemented M1 mock-node slice with metadata-only ledger status and balance reads. Chat usage remains synthetic and test credits only; no real model inference, deposits or payouts are active."
   },
   "paths": {
     "/healthz": {
@@ -721,6 +721,128 @@
           },
           "503": {
             "description": "Request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/billing/balance": {
+      "get": {
+        "operationId": "getBillingBalance",
+        "summary": "Read the authenticated account balance",
+        "description": "Returns ledger balances as exact decimal piconero strings. This endpoint does not allocate deposits or enable payments.",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current account balance.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Balance"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A browser session is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Ledger is unavailable or recovering.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/requests/{id}": {
+      "get": {
+        "operationId": "getRequestStatus",
+        "summary": "Read metadata-only request status",
+        "description": "The session owner or originating API key with usage:read may query a request. A recovering ledger returns a null charge until reconciliation; prompts and outputs are never returned.",
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata-only status for the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key lacks usage:read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request was not found for this identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Ledger is unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1563,6 +1685,63 @@
         "maxLength": 19,
         "pattern": "^(0|[1-9][0-9]{0,18})$",
         "description": "Canonical decimal piconero string, bounded by the server integer range."
+      },
+      "Balance": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "available_piconero",
+          "reserved_piconero",
+          "earnings_pending_piconero",
+          "earnings_available_piconero",
+          "payout_reserved_piconero",
+          "currency",
+          "updated_at"
+        ],
+        "properties": {
+          "available_piconero": { "$ref": "#/components/schemas/Piconero" },
+          "reserved_piconero": { "$ref": "#/components/schemas/Piconero" },
+          "earnings_pending_piconero": { "$ref": "#/components/schemas/Piconero" },
+          "earnings_available_piconero": { "$ref": "#/components/schemas/Piconero" },
+          "payout_reserved_piconero": { "$ref": "#/components/schemas/Piconero" },
+          "currency": { "const": "XMR", "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RequestStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "model_id",
+          "status",
+          "input_tokens",
+          "output_tokens",
+          "charged_piconero",
+          "latency_ms",
+          "created_at",
+          "finished_at"
+        ],
+        "properties": {
+          "request_id": { "type": "string", "format": "uuid" },
+          "model_id": { "type": "string", "const": "cordova-chat-small-v1" },
+          "status": {
+            "type": "string",
+            "enum": ["accepted", "running", "settled", "refunded", "cancelled", "recovering"]
+          },
+          "input_tokens": { "type": "integer", "minimum": 0 },
+          "output_tokens": { "type": "integer", "minimum": 0 },
+          "charged_piconero": {
+            "anyOf": [
+              { "$ref": "#/components/schemas/Piconero" },
+              { "type": "null" }
+            ],
+            "description": "Null only while ledger recovery prevents a reliable charge result."
+          },
+          "latency_ms": { "type": ["integer", "null"], "minimum": 0 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "finished_at": { "type": ["string", "null"], "format": "date-time" }
+        }
       },
       "APIKey": {
         "type": "object",

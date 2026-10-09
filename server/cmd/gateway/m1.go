@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"cordova/server/internal/billing"
 	"cordova/server/internal/m1"
 	"cordova/server/internal/mocknode"
 
@@ -55,6 +56,14 @@ func runM1(address string) error {
 	defer rdb.Close()
 	config := m1.Config{Origin: origin, PrivacyNoticeVersion: notice, Pepper: pepper, SecureCookies: true, TrustProxy: strings.EqualFold(os.Getenv("CORDOVA_TRUST_PROXY"), "true")}
 	store, err := m1.NewStore(rdb, config)
+	if err != nil {
+		return err
+	}
+	journal, err := billing.NewRedisJournal(rdb, os.Getenv("CORDOVA_ENV") != "development")
+	if err != nil {
+		return err
+	}
+	ledger, err := billing.NewRedisLedger(journal)
 	if err != nil {
 		return err
 	}
@@ -102,12 +111,18 @@ func runM1(address string) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	handler, err := m1.NewHandler(config, store, provider, func(ctx context.Context) error {
+	if _, err := ledger.Recover(startupCtx, time.Now().UTC()); err != nil {
+		return errors.New("M3 ledger recovery did not complete; gateway remains unavailable")
+	}
+	handler, err := m1.NewHandlerWithLedger(config, store, provider, ledger, func(ctx context.Context) error {
 		if err := rdb.Ping(ctx).Err(); err != nil {
 			return errors.New("Redis is unavailable")
 		}
 		if err := events.Ping(ctx); err != nil {
 			return err
+		}
+		if !ledger.Ready() {
+			return errors.New("financial ledger recovery is incomplete")
 		}
 		return provider.Ping(ctx)
 	})

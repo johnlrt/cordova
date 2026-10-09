@@ -13,17 +13,40 @@ import (
 	"time"
 
 	"cordova/server/internal/api"
+	"cordova/server/internal/billing"
 	"cordova/server/internal/domain"
 	"cordova/server/internal/inference"
 )
 
 type Handler struct {
-	store *Store
-	cfg   Config
-	ready func(context.Context) error
+	store        *Store
+	cfg          Config
+	ledger       AccountingReader
+	authenticate api.Authenticator
+	ready        func(context.Context) error
+}
+
+type AccountingReader interface {
+	Balance(context.Context, string) (billing.Balance, error)
+	Request(context.Context, string) (billing.RequestCheckpoint, uint64, error)
+	Operation(context.Context, string) (billing.Entry, error)
+	Ready() bool
 }
 
 func NewHandler(cfg Config, store *Store, provider inference.Provider, readiness ...func(context.Context) error) (http.Handler, error) {
+	return newHandler(cfg, store, provider, nil, readiness...)
+}
+
+func NewHandlerWithLedger(cfg Config, store *Store, provider inference.Provider, ledger AccountingReader,
+	readiness ...func(context.Context) error) (http.Handler, error) {
+	if ledger == nil {
+		return nil, errors.New("M3 request ledger is required")
+	}
+	return newHandler(cfg, store, provider, ledger, readiness...)
+}
+
+func newHandler(cfg Config, store *Store, provider inference.Provider, ledger AccountingReader,
+	readiness ...func(context.Context) error) (http.Handler, error) {
 	if store == nil {
 		return nil, errors.New("M1 store is required")
 	}
@@ -32,7 +55,7 @@ func NewHandler(cfg Config, store *Store, provider inference.Provider, readiness
 		return nil, err
 	}
 	mux := http.NewServeMux()
-	h := &Handler{store: store, cfg: cfg}
+	h := &Handler{store: store, cfg: cfg, ledger: ledger, authenticate: store.Authenticate}
 	if len(readiness) > 0 {
 		h.ready = readiness[0]
 	}
@@ -52,6 +75,8 @@ func NewHandler(cfg Config, store *Store, provider inference.Provider, readiness
 	mux.HandleFunc("/api/keys", h.keys)
 	mux.HandleFunc("/api/keys/", h.revokeKey)
 	mux.HandleFunc("/api/usage", h.usage)
+	mux.HandleFunc("/api/billing/balance", h.billingBalance)
+	mux.HandleFunc("/api/requests/{id}", h.requestStatus)
 	mux.HandleFunc("/api/live-ticket", h.liveTicket)
 	mux.HandleFunc("/api/live", h.live)
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +89,9 @@ func NewHandler(cfg Config, store *Store, provider inference.Provider, readiness
 			err = h.ready(r.Context())
 		} else {
 			err = store.redis.Ping(r.Context()).Err()
+			if err == nil && ledger != nil && !ledger.Ready() {
+				err = billing.ErrJournalCircuitOpen
+			}
 		}
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Storage is unavailable.")
@@ -336,6 +364,167 @@ func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "next_cursor": nil})
+}
+
+func (h *Handler) billingBalance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	principal, ok := h.authenticate(r)
+	if !ok || principal.Kind != "session" {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "Sign in to view the balance.")
+		return
+	}
+	if h.ledger == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Billing is not available right now.")
+		return
+	}
+	balance, err := h.ledger.Balance(r.Context(), principal.AccountID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Balance is not available right now.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available_piconero": balance.Available, "reserved_piconero": balance.Reserved,
+		"earnings_pending_piconero": balance.OwnerPending, "earnings_available_piconero": balance.OwnerAvailable,
+		"payout_reserved_piconero": balance.PayoutReserved, "currency": "XMR", "updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+type requestStatusView struct {
+	RequestID    string           `json:"request_id"`
+	ModelID      string           `json:"model_id"`
+	Status       string           `json:"status"`
+	InputTokens  int64            `json:"input_tokens"`
+	OutputTokens int64            `json:"output_tokens"`
+	Charged      *domain.Piconero `json:"charged_piconero"`
+	LatencyMS    *int64           `json:"latency_ms"`
+	CreatedAt    time.Time        `json:"created_at"`
+	FinishedAt   *time.Time       `json:"finished_at"`
+}
+
+func (h *Handler) requestStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	accountID, keyID, authStatus := h.requestStatusPrincipal(r)
+	if authStatus != 0 {
+		code, message := "unauthenticated", "Sign in or use an authorized API key."
+		if authStatus == http.StatusForbidden {
+			code, message = "forbidden", "This API key cannot read request history."
+		}
+		writeError(w, authStatus, code, message)
+		return
+	}
+	if h.ledger == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Request status is not available right now.")
+		return
+	}
+	requestID := r.PathValue("id")
+	checkpoint, _, err := h.ledger.Request(r.Context(), requestID)
+	if errors.Is(err, billing.ErrRequestNotFound) || errors.Is(err, billing.ErrInvalidOperation) {
+		writeError(w, http.StatusNotFound, "not_found", "Request was not found.")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Request status is not available right now.")
+		return
+	}
+	if checkpoint.AccountID != accountID || keyID != "" && checkpoint.APIKeyID != keyID {
+		writeError(w, http.StatusNotFound, "not_found", "Request was not found.")
+		return
+	}
+	status := string(checkpoint.Status)
+	recovering := !h.ledger.Ready()
+	if recovering {
+		status = "recovering"
+	}
+	charged, _ := domain.NewPiconero(0)
+	var outputTokens int64
+	var terminalOperation string
+	if !recovering {
+		for attemptID, attempt := range checkpoint.Attempts {
+			switch attempt.Reservation.Status {
+			case billing.AttemptSettled:
+				quote, quoteErr := billing.CalculateQuote(checkpoint.InputTokens, attempt.OutputTokens, checkpoint.MaxOutputTokens, checkpoint.Price, false)
+				if quoteErr != nil {
+					writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Request accounting needs reconciliation.")
+					return
+				}
+				charged, outputTokens, terminalOperation = quote.ActualCost, attempt.OutputTokens, "settle:"+requestID
+			case billing.AttemptCancelled:
+				quote, quoteErr := billing.CalculateQuote(checkpoint.InputTokens, attempt.OutputTokens, checkpoint.MaxOutputTokens, checkpoint.Price, true)
+				if quoteErr != nil {
+					writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Request accounting needs reconciliation.")
+					return
+				}
+				charged, outputTokens, terminalOperation = quote.ActualCost, attempt.OutputTokens, "cancel:"+requestID
+			case billing.AttemptRefunded:
+				if attempt.Reservation.OwnerID == checkpoint.OwnerID && checkpoint.Status == billing.RequestRefunded {
+					outputTokens = attempt.OutputTokens
+					terminalOperation = "refund:" + requestID + ":" + attemptID
+				}
+			}
+		}
+	}
+	var finishedAt *time.Time
+	var latencyMS *int64
+	if terminalOperation != "" && !recovering {
+		var operation billing.Entry
+		var opErr error
+		if checkpoint.Status == billing.RequestRefunded {
+			operation, opErr = h.ledger.Operation(r.Context(), "abandon:"+requestID)
+			if errors.Is(opErr, billing.ErrRequestNotFound) {
+				operation, opErr = h.ledger.Operation(r.Context(), terminalOperation)
+			}
+		} else {
+			operation, opErr = h.ledger.Operation(r.Context(), terminalOperation)
+		}
+		if opErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Request status is not available right now.")
+			return
+		}
+		finished := operation.CreatedAt.UTC()
+		finishedAt = &finished
+		latency := finished.Sub(checkpoint.AcceptedAt).Milliseconds()
+		if latency < 0 {
+			latency = 0
+		}
+		latencyMS = &latency
+	}
+	var chargedValue *domain.Piconero
+	if !recovering {
+		chargedValue = &charged
+	}
+	writeJSON(w, http.StatusOK, requestStatusView{RequestID: requestID, ModelID: checkpoint.ModelID, Status: status,
+		InputTokens: checkpoint.InputTokens, OutputTokens: outputTokens, Charged: chargedValue,
+		LatencyMS: latencyMS, CreatedAt: checkpoint.AcceptedAt.UTC(), FinishedAt: finishedAt})
+}
+
+func (h *Handler) requestStatusPrincipal(r *http.Request) (accountID, keyID string, status int) {
+	if h.authenticate == nil {
+		return "", "", http.StatusUnauthorized
+	}
+	principal, authenticated := h.authenticate(r)
+	if !authenticated || principal.AccountID == "" {
+		return "", "", http.StatusUnauthorized
+	}
+	switch principal.Kind {
+	case "session":
+		return principal.AccountID, "", 0
+	case "key":
+		if !principal.Scopes["usage:read"] {
+			return "", "", http.StatusForbidden
+		}
+		if principal.KeyID == "" {
+			return "", "", http.StatusUnauthorized
+		}
+		return principal.AccountID, principal.KeyID, 0
+	default:
+		return "", "", http.StatusUnauthorized
+	}
 }
 
 func (h *Handler) liveTicket(w http.ResponseWriter, r *http.Request) {
