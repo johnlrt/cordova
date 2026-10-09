@@ -28,6 +28,9 @@ def main() -> int:
         expected = {"gateway", "mock-node", "redis", "redpanda", "edge"}
         if set(services) != expected:
             fail("Compose service inventory does not match the M1 stack")
+        gateway_environment = services["gateway"].get("environment", {})
+        if gateway_environment.get("CORDOVA_PRIVACY_NOTICE_VERSION") != "privacy-v1":
+            fail("the gateway must use the current privacy notice version")
         for name, service in services.items():
             ports = service.get("ports", [])
             if name != "edge" and ports:

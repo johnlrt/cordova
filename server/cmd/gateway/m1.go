@@ -32,7 +32,7 @@ func runM1(address string) error {
 	}
 	notice := strings.TrimSpace(os.Getenv("CORDOVA_PRIVACY_NOTICE_VERSION"))
 	if notice == "" {
-		notice = "v1"
+		notice = m1.DefaultPrivacyNoticeVersion
 	}
 	pepper, err := secretBytes("CORDOVA_APP_PEPPER", "CORDOVA_APP_PEPPER_FILE")
 	if err != nil {

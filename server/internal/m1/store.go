@@ -57,6 +57,8 @@ type Config struct {
 	UsagePendingKey         string
 }
 
+const DefaultPrivacyNoticeVersion = "privacy-v1"
+
 type Store struct {
 	redis           *redis.Client
 	cfg             Config
