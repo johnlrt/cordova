@@ -4,6 +4,12 @@ services:
     # file keeps its persistent /data volume and its durability settings.
     command: [sh, -c, "exec redis-server --dir /tmp --appendonly yes --appendfsync everysec --requirepass \"$$(cat /run/secrets/redis_password)\""]
 
+  redpanda:
+    # In the isolated single-node dev stack, wait for Kafka metadata requests
+    # to work. Full cluster-health reports can remain in `starting` in dev mode.
+    healthcheck:
+      test: [CMD, rpk, cluster, info, -X, brokers=redpanda:9092]
+
   gateway:
     environment:
       CORDOVA_ENV: development
