@@ -85,15 +85,20 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request) {
 		closeLive(conn, websocket.CloseInternalServerErr, "unavailable")
 		return
 	}
+	_, cursor, err := h.store.LiveEvents(r.Context(), account.ID, "")
+	if err != nil {
+		closeLive(conn, websocket.CloseInternalServerErr, "unavailable")
+		return
+	}
 	sessionIDText := sessionID.String()
 	sequence := uint32(1)
 	if writeLive(conn, &sequence, "live.ready", auth.RequestID, &sessionIDText, map[string]any{"session_id": sessionIDText, "account_id": account.ID, "heartbeat_interval_ms": 15000}) != nil {
 		return
 	}
-	h.runLiveConnection(r.Context(), conn, cookie.Value, account.ID, sessionIDText)
+	h.runLiveConnection(r.Context(), conn, cookie.Value, account.ID, sessionIDText, cursor)
 }
 
-func (h *Handler) runLiveConnection(parent context.Context, conn *websocket.Conn, cookie, accountID, sessionID string) {
+func (h *Handler) runLiveConnection(parent context.Context, conn *websocket.Conn, cookie, accountID, sessionID, cursor string) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	type inbound struct {
@@ -119,7 +124,6 @@ func (h *Handler) runLiveConnection(parent context.Context, conn *websocket.Conn
 	sequence := uint32(2)
 	expectedInbound := uint32(2)
 	var topics map[string]bool
-	cursor := ""
 	lastHeartbeat := time.Now()
 	poll := time.NewTicker(250 * time.Millisecond)
 	defer poll.Stop()
@@ -175,7 +179,6 @@ func (h *Handler) runLiveConnection(parent context.Context, conn *websocket.Conn
 					}
 					topics[topic] = true
 				}
-				cursor = ""
 				if string(subscription.LastEventID) != "null" {
 					if json.Unmarshal(subscription.LastEventID, &cursor) != nil || len(cursor) > 256 {
 						closeLive(conn, websocket.ClosePolicyViolation, "invalid subscription")
