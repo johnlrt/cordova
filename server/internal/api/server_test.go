@@ -154,6 +154,92 @@ func TestBufferedAndStreamingResponses(t *testing.T) {
 	}
 }
 
+func TestC2GenerationParametersReachProvider(t *testing.T) {
+	var captured inference.Request
+	provider := providerFunc(func(ctx context.Context, req inference.Request, emit func(string) error) (inference.Result, error) {
+		captured = req
+		if err := emit("synthetic"); err != nil {
+			return inference.Result{}, err
+		}
+		return inference.Result{FinishReason: "stop"}, nil
+	})
+	body := strings.TrimSuffix(validBody, "}") + `,"temperature":0,"top_p":0.5,"stop":["END","готово"],"seed":123,"n":1,"user":"discarded"}`
+	w := call(handler(t, provider), "POST", "/v1/chat/completions", body, testKey)
+	if w.Code != 200 {
+		t.Fatalf("completion: %d %s", w.Code, w.Body.String())
+	}
+	if captured.MaxTokens != 512 || captured.Parameters.Temperature != 0 || captured.Parameters.TopP != 0.5 || captured.Parameters.Seed == nil || *captured.Parameters.Seed != 123 {
+		t.Fatalf("unexpected provider request: %#v", captured)
+	}
+	if len(captured.Parameters.Stop) != 2 || captured.Parameters.Stop[0] != "END" || captured.Parameters.Stop[1] != "готово" {
+		t.Fatalf("stop values not normalized: %#v", captured.Parameters.Stop)
+	}
+	if strings.Contains(w.Body.String(), "discarded") {
+		t.Fatal("user metadata leaked into the response")
+	}
+}
+
+func TestC2GenerationDefaultsAndStopString(t *testing.T) {
+	var captured inference.Request
+	provider := providerFunc(func(ctx context.Context, req inference.Request, emit func(string) error) (inference.Result, error) {
+		captured = req
+		return inference.Result{FinishReason: "stop"}, nil
+	})
+	body := strings.TrimSuffix(validBody, "}") + `,"stop":"END"}`
+	w := call(handler(t, provider), "POST", "/v1/chat/completions", body, testKey)
+	if w.Code != 200 {
+		t.Fatalf("completion: %d %s", w.Code, w.Body.String())
+	}
+	if captured.Parameters.Temperature != 0.7 || captured.Parameters.TopP != 0.95 || captured.Parameters.Seed != nil {
+		t.Fatalf("unexpected parameter defaults: %#v", captured.Parameters)
+	}
+	if len(captured.Parameters.Stop) != 1 || captured.Parameters.Stop[0] != "END" {
+		t.Fatalf("scalar stop was not normalized: %#v", captured.Parameters.Stop)
+	}
+}
+
+func TestC2GenerationParameterValidation(t *testing.T) {
+	base := strings.TrimSuffix(validBody, "}")
+	tooLongStop := strings.Repeat("界", 129)
+	cases := []struct {
+		name, field, value, wantCode string
+	}{
+		{"temperature below minimum", "temperature", "-0.01", "invalid_request"},
+		{"temperature above maximum", "temperature", "2.01", "invalid_request"},
+		{"top_p zero", "top_p", "0", "invalid_request"},
+		{"top_p above maximum", "top_p", "1.01", "invalid_request"},
+		{"too many stop strings", "stop", `["a","b","c","d","e"]`, "invalid_request"},
+		{"long stop string", "stop", `"` + tooLongStop + `"`, "invalid_request"},
+		{"stop object", "stop", `{}`, "invalid_request"},
+		{"stop null entry", "stop", `["a",null]`, "invalid_request"},
+		{"negative seed", "seed", "-1", "invalid_request"},
+		{"large seed", "seed", "2147483648", "invalid_request"},
+		{"fractional seed", "seed", "1.5", "invalid_request"},
+		{"n zero", "n", "0", "unsupported_parameter"},
+		{"n two", "n", "2", "unsupported_parameter"},
+		{"user wrong type", "user", "[]", "invalid_request"},
+		{"temperature null", "temperature", "null", "invalid_request"},
+		{"top_p null", "top_p", "null", "invalid_request"},
+		{"stop null", "stop", "null", "invalid_request"},
+		{"seed null", "seed", "null", "invalid_request"},
+		{"n null", "n", "null", "invalid_request"},
+		{"user null", "user", "null", "invalid_request"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := base + `,"` + tc.field + `":` + tc.value + `}`
+			w := call(handler(t, inference.Mock{}), "POST", "/v1/chat/completions", body, testKey)
+			if w.Code != 400 {
+				t.Fatalf("want 400 got %d: %s", w.Code, w.Body.String())
+			}
+			var response errorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.Error.Code != tc.wantCode {
+				t.Fatalf("want code %q, got %s", tc.wantCode, w.Body.String())
+			}
+		})
+	}
+}
+
 type providerFunc func(context.Context, inference.Request, func(string) error) (inference.Result, error)
 
 func (f providerFunc) Generate(ctx context.Context, req inference.Request, emit func(string) error) (inference.Result, error) {
