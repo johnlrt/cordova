@@ -37,5 +37,8 @@ jobs:
       - run: npm run contracts:check
       - run: python ../scripts/contracts-check.py
       - run: npm run check
-      - run: npm test
+      - run: npm run check:browser
+      - run: npm run test:unit
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
       - run: npm run build

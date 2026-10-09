@@ -64,9 +64,12 @@ Linux: используйте `npm` вместо `npm.cmd`. После обно�
 
 ```powershell
 Set-Location frontend
+npx.cmd playwright install chromium
 npm.cmd run check
-npm.cmd test
+npm.cmd run check:browser
+npm.cmd run test:unit
+npm.cmd run test:browser
 npm.cmd run build
 ```
 
-`npm.cmd run check`, `npm.cmd test` и `npm.cmd run build` проверяют типы, DTO/auth/live единичные границы и статическую маршрутизацию. Go-тесты дополнительно проверяют static UI, отсутствие листинга каталогов, сохранение авторизации API и недоступность файлов вне сборки. Пилотные браузерные проверки остаются прежними; браузерная интеграция нового аккаунтного потока ожидает серверные C2/C4 endpoints. Проверки на реальном Ultra, ускорители и inference в этот frontend-этап не входят.
+`npm.cmd run check`, `npm.cmd run check:browser`, `npm.cmd run test:unit`, `npm.cmd run test:browser` и `npm.cmd run build` проверяют типы, DTO/auth/live границы, пять Chromium-сценариев на тестовых REST/WebSocket fixtures и статическую сборку. Один сценарий подтверждает, что live invalidation обновляет usage только после подтверждающего REST-ответа. Эти fixtures не заменяют серверные проверки: реальная регистрация и live обновления всё ещё ждут C2/C4 endpoints, а smoke через nginx — M1 integration. Go-тесты дополнительно проверяют static UI, отсутствие листинга каталогов, сохранение авторизации API и недоступность файлов вне сборки. Проверки на реальном Ultra, ускорители и inference в этот frontend-этап не входят.
