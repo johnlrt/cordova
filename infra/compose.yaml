@@ -139,7 +139,7 @@ services:
     mem_limit: 1g
     restart: unless-stopped
     healthcheck:
-      test: [CMD, rpk, cluster, health, --brokers, redpanda:9092]
+      test: [CMD, rpk, cluster, info, --brokers, redpanda:9092, --print-brokers]
       interval: 10s
       timeout: 5s
       retries: 20
