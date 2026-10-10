@@ -342,6 +342,7 @@ func configuredTokenizer(endpoint, token string, tokenConfigured bool, catalogDa
 		models = append(models, trustedtokenizer.Model{
 			ID: manifest.Model.ID, CatalogVersion: catalog.Version,
 			ContextTokens:   manifest.Model.ContextTokens,
+			AddBOS:          manifest.AddBOS,
 			TokenizerSHA256: manifest.TokenizerSHA256, TemplateSHA256: manifest.TemplateSHA256,
 		})
 	}

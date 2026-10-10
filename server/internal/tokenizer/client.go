@@ -43,6 +43,7 @@ type Model struct {
 	ID              string
 	CatalogVersion  string
 	ContextTokens   uint32
+	AddBOS          bool
 	TokenizerSHA256 string
 	TemplateSHA256  string
 }
