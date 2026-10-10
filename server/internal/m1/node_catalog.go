@@ -140,6 +140,21 @@ func requireJSONFields(value map[string]json.RawMessage, fields ...string) error
 }
 
 func verifyNodeCatalogManifest(manifest NodeCatalogManifest, publicKey ed25519.PublicKey) error {
+	if err := validateNodeCatalogManifestFields(manifest); err != nil {
+		return err
+	}
+	signature, err := base64.StdEncoding.DecodeString(manifest.Signature)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return errors.New("manifest signature is invalid")
+	}
+	canonical, err := canonicalUnsignedManifest(manifest)
+	if err != nil || !ed25519.Verify(publicKey, canonical, signature) {
+		return errors.New("manifest signature does not match the configured catalog key")
+	}
+	return nil
+}
+
+func validateNodeCatalogManifestFields(manifest NodeCatalogManifest) error {
 	model := manifest.Model
 	if !validModelSlug(model.ID) || model.Object != "model" || model.OwnedBy != "cordova" ||
 		model.ContextTokens == 0 || model.MaxOutputTokens == 0 || model.MaxOutputTokens > model.ContextTokens ||
@@ -161,15 +176,73 @@ func verifyNodeCatalogManifest(manifest NodeCatalogManifest, publicKey ed25519.P
 		manifest.LicenseSPDX == "" || len(manifest.LicenseSPDX) > 128 || !validID(manifest.Version) {
 		return errors.New("license or llama.cpp revision is invalid")
 	}
-	signature, err := base64.StdEncoding.DecodeString(manifest.Signature)
-	if err != nil || len(signature) != ed25519.SignatureSize {
-		return errors.New("manifest signature is invalid")
-	}
-	canonical, err := canonicalUnsignedManifest(manifest)
-	if err != nil || !ed25519.Verify(publicKey, canonical, signature) {
-		return errors.New("manifest signature does not match the configured catalog key")
-	}
 	return nil
+}
+
+// SignNodeCatalogSnapshot signs every manifest with an offline Ed25519 key and
+// verifies the completed snapshot before returning it.
+func SignNodeCatalogSnapshot(snapshot NodeCatalogSnapshot, privateKey ed25519.PrivateKey) (NodeCatalogSnapshot, error) {
+	if len(privateKey) != ed25519.PrivateKeySize || !bytes.Equal(ed25519.NewKeyFromSeed(privateKey.Seed()), privateKey) {
+		return NodeCatalogSnapshot{}, errors.New("catalog signing key must be a valid Ed25519 private key")
+	}
+	if !validID(snapshot.Version) || snapshot.Models == nil || len(snapshot.Models) == 0 || len(snapshot.Models) > maxNodeCatalogModels {
+		return NodeCatalogSnapshot{}, errors.New("catalog snapshot version or model count is invalid")
+	}
+	seen := make(map[string]struct{}, len(snapshot.Models))
+	for i := range snapshot.Models {
+		manifest := &snapshot.Models[i]
+		manifest.Signature = ""
+		if err := validateNodeCatalogManifestFields(*manifest); err != nil {
+			return NodeCatalogSnapshot{}, fmt.Errorf("node catalog model %d: %w", i, err)
+		}
+		if _, exists := seen[manifest.Model.ID]; exists {
+			return NodeCatalogSnapshot{}, errors.New("node catalog contains duplicate model IDs")
+		}
+		seen[manifest.Model.ID] = struct{}{}
+		canonical, err := canonicalUnsignedManifest(*manifest)
+		if err != nil {
+			return NodeCatalogSnapshot{}, fmt.Errorf("canonicalize node catalog model %d: %w", i, err)
+		}
+		manifest.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, canonical))
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil || len(encoded) > MaxNodeCatalogBytes {
+		return NodeCatalogSnapshot{}, errors.New("encoded node catalog exceeds the safe WebSocket frame limit")
+	}
+	verified, err := parseNodeCatalog(encoded, privateKey.Public().(ed25519.PublicKey))
+	if err != nil {
+		return NodeCatalogSnapshot{}, fmt.Errorf("verify signed node catalog: %w", err)
+	}
+	return verified, nil
+}
+
+// SignNodeCatalogJSON strictly decodes an unsigned catalog template, signs it,
+// and returns a verified, pretty-printed snapshot suitable for deployment.
+func SignNodeCatalogJSON(data []byte, privateKey ed25519.PrivateKey) ([]byte, error) {
+	if len(data) == 0 || len(data) > MaxNodeCatalogBytes || duplicateJSON(data) != nil {
+		return nil, errors.New("catalog template is empty, oversized or contains invalid JSON")
+	}
+	if err := requireNodeCatalogFields(data); err != nil {
+		return nil, err
+	}
+	var snapshot NodeCatalogSnapshot
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&snapshot); err != nil {
+		return nil, fmt.Errorf("decode catalog template: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, errors.New("catalog template must contain exactly one JSON value")
+	}
+	signed, err := SignNodeCatalogSnapshot(snapshot, privateKey)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.MarshalIndent(signed, "", "  ")
+	if err != nil || len(encoded)+1 > MaxNodeCatalogBytes {
+		return nil, errors.New("formatted node catalog exceeds the safe WebSocket frame limit")
+	}
+	return append(encoded, '\n'), nil
 }
 
 func canonicalUnsignedManifest(manifest NodeCatalogManifest) ([]byte, error) {
