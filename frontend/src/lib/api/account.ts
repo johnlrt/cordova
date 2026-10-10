@@ -95,3 +95,14 @@ export async function fetchLiveTicket(csrfToken: string, signal?: AbortSignal): 
   if (Date.parse(ticket.expires_at) <= Date.now() || Date.parse(ticket.expires_at) > Date.now() + 35_000) throw new ApiFailure('invalid_response');
   return ticket.ticket;
 }
+
+export async function approveNodeEnrollment(userCode: string, csrfToken: string, signal?: AbortSignal): Promise<void> {
+  const normalizedCode = userCode.trim().toUpperCase();
+  if (!/^[A-Z2-7]{5}-[A-Z2-7]{5}-[A-Z2-7]{3}$/.test(normalizedCode)) {
+    throw new ApiFailure('invalid_request');
+  }
+  if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
+  await accountRequest('/api/node/enrollments/approve', {
+    method: 'POST', body: { user_code: normalizedCode }, csrfToken, signal, expectedStatus: 204
+  });
+}

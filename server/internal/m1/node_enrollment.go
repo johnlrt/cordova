@@ -123,7 +123,7 @@ return 1`, []string{nodeEnrollmentPrefix + record.ID,
 		return nodeEnrollmentCreated{}, errors.New("node enrollment identifier collision")
 	}
 	return nodeEnrollmentCreated{EnrollmentID: record.ID, UserCode: userCode, DeviceCode: deviceCode,
-		VerificationURI: s.origin + "/pilot#nodes", ExpiresAt: expires, PollIntervalSeconds: 5}, nil
+		VerificationURI: s.origin + "/dashboard/nodes", ExpiresAt: expires, PollIntervalSeconds: 5}, nil
 }
 
 func (s *nodeService) approveEnrollment(ctx context.Context, accountID, userCode string) error {

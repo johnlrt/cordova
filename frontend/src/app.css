@@ -672,3 +672,28 @@ form > label { color: var(--text-secondary); font-size: 13px; }
   .auth-actions .secondary { display: none; }
   .recovery-code-list { grid-template-columns: 1fr; }
 }
+
+.key-message, .key-error { margin: 16px 0; padding: 12px 14px; border: 1px solid #345b47; border-radius: 10px; color: #bce5cc; background: #17261f; font-size: 12px; line-height: 1.6; }
+.key-error { border-color: #68413a; color: #ffd3c2; background: #2b1c1a; }
+.node-access-page { max-width: 900px; }
+.node-access-page h1 { margin-top: 10px; }
+.node-approval-panel { min-height: 0; margin: 22px 0 16px; }
+.node-approval-panel h2 { margin-top: 7px; color: #edf0f6; font-size: 20px; }
+.node-approval-steps { display: grid; gap: 10px; margin: 0 0 20px; padding-left: 22px; color: #b6c0d0; font-size: 12px; line-height: 1.65; }
+.node-approval-steps li::marker { color: #aebeff; font-weight: 700; }
+.node-approval-steps code { color: #cfdaff; }
+.node-approval-form { display: grid; gap: 12px; max-width: 620px; }
+.node-approval-form input[name="user-code"] { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid #394355; border-radius: 9px; color: #edf0f6; background: #111720; font: 600 18px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .06em; }
+.node-approval-form input[name="user-code"]:focus { border-color: #869eff; outline: 3px solid #8298ff36; }
+.node-code-help { color: #8995aa; font-size: 11px; line-height: 1.55; }
+.node-approval-form .privacy-accept { display: flex; align-items: flex-start; gap: 10px; margin: 8px 0; color: #c5cedd; font-size: 12px; line-height: 1.55; cursor: pointer; }
+.node-approval-form .privacy-accept input { flex: 0 0 auto; width: 16px; height: 16px; margin: 1px 0 0; accent-color: #8198ff; }
+.node-approval-form .primary { justify-self: start; min-width: 190px; }
+.node-privacy-note { margin-top: 20px; padding: 13px 15px; border: 1px solid #59472a; border-radius: 10px; color: #e3c991; background: #211d16; font-size: 12px; line-height: 1.65; }
+.node-management-boundary { padding: 16px 18px; border: 1px dashed #3a4150; border-radius: 11px; background: #141820; }
+.node-management-boundary strong { color: #d9deea; font-size: 12px; }
+.node-management-boundary p { margin-top: 6px; color: #a9b2c2; font-size: 11px; line-height: 1.6; }
+@media (max-width: 760px) {
+  .node-approval-panel { padding: 18px; }
+  .node-approval-form .primary { width: 100%; }
+}
