@@ -16,7 +16,7 @@ The frontend displays only completed metadata. Prompts and generated text do not
 - API-key creation with a one-time secret, HMAC verifier indexing, owner-only listing, revocation, scope checks, and a 20-key account cap.
 - OpenAI-style model listing and SSE chat through a private TLS WebSocket synthetic node. The gateway's synthetic tokenizer recounts usage; the zero-priced ledger stores request lifecycle metadata and the usage projection stores content-free rows only.
 - Redis Streams outbox to Kafka with account partitioning and idempotent metadata projection. Dashboard usage is fetched from the projection; C4 live WebSocket invalidations use a short-lived, one-use, session-bound ticket and contain no content.
-- Svelte dashboard, login, recovery and API-guide pages. It refreshes usage after a live invalidation and polls every 30 seconds as a fallback.
+- Svelte dashboard, login, recovery, API-key management and API-guide pages. It refreshes usage after a live invalidation and polls every 30 seconds as a fallback.
 - Local nginx TLS, SSE and WebSocket proxying, strict TLS versions, browser security headers, denied public readiness/metrics/payment routes, private Redis/Kafka/node networks, and generated local secrets/certificates.
 - OpenAPI account/key/usage routes and C3/C4 registries checked in CI without Docker or service credentials.
 - Optional C3 enrollment and HMAC challenge/JWT HTTP endpoints. They stay disabled unless both an AES-256 node-secret encryption key and an Ed25519 signing key are configured.

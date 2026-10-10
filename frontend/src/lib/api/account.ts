@@ -1,6 +1,6 @@
 import { ApiFailure } from './client.ts';
 import { matchesOpenApi } from './generated/contracts.ts';
-import type { AccountErrorResponse, LiveTicket, RegistrationResult, SessionView } from './generated/contracts.ts';
+import type { AccountErrorResponse, APIKey, LiveTicket, RegistrationResult, SessionView } from './generated/contracts.ts';
 export type { Account, RegistrationResult, SessionView } from './generated/contracts.ts';
 export function decodeSession(value: unknown): SessionView {
   if (!matchesOpenApi(value, 'SessionView')) throw new ApiFailure('invalid_response');
@@ -24,7 +24,7 @@ function decodeError(response: Response, value: unknown): ApiFailure {
 }
 
 async function accountRequest(path: string, options: {
-  method?: 'GET' | 'POST'; body?: Record<string, unknown>; csrfToken?: string; signal?: AbortSignal; expectedStatus?: number;
+  method?: 'GET' | 'POST' | 'DELETE'; body?: Record<string, unknown>; csrfToken?: string; signal?: AbortSignal; expectedStatus?: number;
 } = {}): Promise<unknown> {
   if (!path.startsWith('/api/') || path.startsWith('//') || path.includes('\\')) throw new ApiFailure('invalid_request');
   let url: URL;
@@ -94,4 +94,45 @@ export async function fetchLiveTicket(csrfToken: string, signal?: AbortSignal): 
   const ticket = value as LiveTicket;
   if (Date.parse(ticket.expires_at) <= Date.now() || Date.parse(ticket.expires_at) > Date.now() + 35_000) throw new ApiFailure('invalid_response');
   return ticket.ticket;
+}
+
+export interface APIKeyList { data: APIKey[]; next_cursor: null; }
+export interface CreatedAPIKey { key: APIKey; secret: string; }
+export interface APIKeySettings {
+  name: string;
+  permissions: Array<'chat:write' | 'models:read' | 'usage:read'>;
+  model_ids: string[];
+  daily_spend_cap_piconero: string;
+}
+
+export function decodeAPIKeyList(value: unknown): APIKeyList {
+  if (!matchesOpenApi(value, 'APIKeyList')) throw new ApiFailure('invalid_response');
+  return value as APIKeyList;
+}
+
+export function decodeCreatedAPIKey(value: unknown): CreatedAPIKey {
+  if (!matchesOpenApi(value, 'APIKeyCreateResponse')) throw new ApiFailure('invalid_response');
+  return value as CreatedAPIKey;
+}
+
+export async function listAPIKeys(signal?: AbortSignal): Promise<APIKeyList> {
+  return decodeAPIKeyList(await accountRequest('/api/keys', { signal, expectedStatus: 200 }));
+}
+
+export async function createAPIKey(settings: APIKeySettings, csrfToken: string, signal?: AbortSignal): Promise<CreatedAPIKey> {
+  if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
+  return decodeCreatedAPIKey(await accountRequest('/api/keys', {
+    method: 'POST', body: {
+      name: settings.name, permissions: settings.permissions, model_ids: settings.model_ids,
+      daily_spend_cap_piconero: settings.daily_spend_cap_piconero
+    }, csrfToken, signal, expectedStatus: 201
+  }));
+}
+
+export async function revokeAPIKey(id: string, csrfToken: string, signal?: AbortSignal): Promise<void> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) {
+    throw new ApiFailure('invalid_request');
+  }
+  if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
+  await accountRequest(`/api/keys/${id}`, { method: 'DELETE', csrfToken, signal, expectedStatus: 204 });
 }
