@@ -204,8 +204,10 @@ mod tests {
 
     #[test]
     fn verifies_shared_go_catalog_signature_vector() {
-        let mut config = Config::default();
-        config.catalog_public_key = Some("p/bfr484uJuozmSbWU+R5NAf3Ff5yUk99DteUKmYc2c=".into());
+        let mut config = Config {
+            catalog_public_key: Some("p/bfr484uJuozmSbWU+R5NAf3Ff5yUk99DteUKmYc2c=".into()),
+            ..Config::default()
+        };
         config
             .allowed_model_hosts
             .push("models.example.test".into());

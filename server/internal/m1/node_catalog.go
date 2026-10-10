@@ -53,7 +53,8 @@ type NodeCatalogModel struct {
 	PriceVersion                 string `json:"price_version"`
 }
 
-func parseNodeCatalog(data []byte, publicKey ed25519.PublicKey) (NodeCatalogSnapshot, error) {
+// ParseNodeCatalog strictly decodes a catalog and verifies every manifest with the provided public key.
+func ParseNodeCatalog(data []byte, publicKey ed25519.PublicKey) (NodeCatalogSnapshot, error) {
 	if len(data) == 0 {
 		return NodeCatalogSnapshot{Version: nodeCatalogVersion, Models: []NodeCatalogManifest{}}, nil
 	}

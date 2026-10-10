@@ -39,6 +39,16 @@ type wordTokenizer struct {
 	outputErr error
 }
 
+type preparedTokenizer struct {
+	wordTokenizer
+	prepared inference.PreparedInput
+	err      error
+}
+
+func (t preparedTokenizer) PrepareInput(context.Context, string, []inference.Message) (inference.PreparedInput, error) {
+	return t.prepared, t.err
+}
+
 func (t wordTokenizer) CountInput(_ context.Context, _ string, messages []inference.Message) (int64, error) {
 	if t.inputErr != nil {
 		return 0, t.inputErr
@@ -85,15 +95,17 @@ func (r *mockRouter) Acquire(_ context.Context, _ string, excluded map[string]st
 }
 
 type mockAttempt struct {
-	owner    string
-	chunks   []string
-	finish   string
-	runErr   error
-	released bool
+	owner         string
+	chunks        []string
+	finish        string
+	runErr        error
+	released      bool
+	receivedInput inference.Request
 }
 
 func (a *mockAttempt) OwnerID() string { return a.owner }
-func (a *mockAttempt) Run(_ context.Context, _ inference.Request, emit func(string) error) (string, error) {
+func (a *mockAttempt) Run(_ context.Context, input inference.Request, emit func(string) error) (string, error) {
+	a.receivedInput = input
 	for _, chunk := range a.chunks {
 		if err := emit(chunk); err != nil {
 			return "", err
@@ -234,6 +246,45 @@ func TestCoordinatorTokenizerFailureDoesNotReserveOrRetry(t *testing.T) {
 	}
 	if len(ledger.Entries()) != 1 {
 		t.Fatalf("tokenizer outage wrote financial records: entries=%d", len(ledger.Entries()))
+	}
+}
+
+func TestCoordinatorPassesExactPreparedIDsToAttemptAndEnforcesContext(t *testing.T) {
+	prepared := inference.PreparedInput{
+		TokenIDs: []uint32{17, 29}, TokenCount: 2, ContextTokens: 8,
+		CatalogVersion: "00000000-0000-4000-8000-000000000001",
+	}
+	attempt := &mockAttempt{owner: newID(t), chunks: []string{"ok"}}
+	_, coordinator, params, input, _ := setupCoordinator(t, preparedTokenizer{prepared: prepared}, "hello world")
+	coordinator.router = &mockRouter{attempts: []*mockAttempt{attempt}}
+	if _, err := coordinator.Execute(context.Background(), params, input, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if attempt.receivedInput.CatalogVersion != prepared.CatalogVersion || attempt.receivedInput.InputTokens != prepared.TokenCount ||
+		len(attempt.receivedInput.InputTokenIDs) != 2 || attempt.receivedInput.InputTokenIDs[0] != 17 || attempt.receivedInput.InputTokenIDs[1] != 29 {
+		t.Fatalf("attempt did not receive exact prepared prompt: %+v", attempt.receivedInput)
+	}
+
+	prepared.ContextTokens = 3
+	ledger, coordinator, params, input, owner := setupCoordinator(t, preparedTokenizer{prepared: prepared}, "hello world")
+	coordinator.router = &mockRouter{attempts: []*mockAttempt{{owner: owner}}}
+	if _, err := coordinator.Execute(context.Background(), params, input, false, nil); !errors.Is(err, ErrInputLimit) {
+		t.Fatalf("context overflow error=%v", err)
+	}
+	if len(ledger.Entries()) != 1 {
+		t.Fatalf("context overflow reserved funds: entries=%d", len(ledger.Entries()))
+	}
+}
+
+func TestCoordinatorMapsTokenizerContextErrorBeforeReservation(t *testing.T) {
+	ledger, coordinator, params, input, owner := setupCoordinator(t,
+		preparedTokenizer{err: inference.ErrContextExceeded}, "hello world")
+	coordinator.router = &mockRouter{attempts: []*mockAttempt{{owner: owner}}}
+	if _, err := coordinator.Execute(context.Background(), params, input, false, nil); !errors.Is(err, ErrInputLimit) {
+		t.Fatalf("context error=%v, want input limit", err)
+	}
+	if len(ledger.Entries()) != 1 {
+		t.Fatalf("context error reserved funds: entries=%d", len(ledger.Entries()))
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"cordova/server/internal/m1"
 	"cordova/server/internal/mocknode"
 	"cordova/server/internal/request"
+	trustedtokenizer "cordova/server/internal/tokenizer"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -44,6 +45,19 @@ func runM1(address string) error {
 		return err
 	}
 	catalogSnapshot, catalogPublicKey, err := nodeCatalogConfig()
+	if err != nil {
+		return err
+	}
+	tokenizerEndpoint := strings.TrimSpace(os.Getenv("CORDOVA_TOKENIZER_URL"))
+	tokenizerToken, tokenizerTokenSet, err := optionalSecretText("CORDOVA_TOKENIZER_TOKEN", "CORDOVA_TOKENIZER_TOKEN_FILE")
+	if err != nil {
+		return err
+	}
+	tokenizerRoots, err := tokenizerTLSRoots()
+	if err != nil {
+		return err
+	}
+	inputTokenizer, trustedTokenizerEnabled, err := configuredTokenizer(tokenizerEndpoint, tokenizerToken, tokenizerTokenSet, catalogSnapshot, catalogPublicKey, tokenizerRoots)
 	if err != nil {
 		return err
 	}
@@ -125,7 +139,7 @@ func runM1(address string) error {
 	if err != nil {
 		return err
 	}
-	coordinator, err := request.NewCoordinator(ledger, mocknode.SyntheticTokenizer{}, router)
+	coordinator, err := request.NewCoordinator(ledger, inputTokenizer, router)
 	if err != nil {
 		return err
 	}
@@ -140,7 +154,8 @@ func runM1(address string) error {
 		redisErr := rdb.Ping(startupCtx).Err()
 		kafkaErr := events.Ping(startupCtx)
 		nodeErr := provider.Ping(startupCtx)
-		if redisErr == nil && kafkaErr == nil && nodeErr == nil {
+		tokenizerErr := checkTokenizerReady(startupCtx, inputTokenizer)
+		if redisErr == nil && kafkaErr == nil && nodeErr == nil && tokenizerErr == nil {
 			break
 		}
 		if startupCtx.Err() != nil {
@@ -164,6 +179,9 @@ func runM1(address string) error {
 		if err := events.Ping(ctx); err != nil {
 			return err
 		}
+		if err := checkTokenizerReady(ctx, inputTokenizer); err != nil {
+			return errors.New("trusted tokenizer is unavailable")
+		}
 		if !ledger.Ready() {
 			return errors.New("financial ledger recovery is incomplete")
 		}
@@ -181,7 +199,11 @@ func runM1(address string) error {
 	server := m1HTTPServer(address, handler)
 	serverResult := make(chan error, 1)
 	go func() { serverResult <- server.ListenAndServe() }()
-	fmt.Printf("Cordova M1 mock slice listening on %s; synthetic usage only; test credits only\n", address)
+	if trustedTokenizerEnabled {
+		fmt.Printf("Cordova M1 mock slice listening on %s; trusted tokenizer enabled; test credits only\n", address)
+	} else {
+		fmt.Printf("Cordova M1 mock slice listening on %s; synthetic usage only; test credits only\n", address)
+	}
 	select {
 	case err := <-serverResult:
 		stopWorkers()
@@ -299,6 +321,67 @@ func nodeCatalogConfig() ([]byte, ed25519.PublicKey, error) {
 		return nil, nil, errors.New("model catalog public key must encode exactly 32 bytes")
 	}
 	return data, ed25519.PublicKey(key), nil
+}
+
+func configuredTokenizer(endpoint, token string, tokenConfigured bool, catalogData []byte, catalogKey ed25519.PublicKey, roots *x509.CertPool) (request.Tokenizer, bool, error) {
+	if endpoint == "" && !tokenConfigured {
+		return mocknode.SyntheticTokenizer{}, false, nil
+	}
+	if endpoint == "" || !tokenConfigured {
+		return nil, false, errors.New("CORDOVA_TOKENIZER_URL and CORDOVA_TOKENIZER_TOKEN (or _FILE) must be configured together")
+	}
+	catalog, err := m1.ParseNodeCatalog(catalogData, catalogKey)
+	if err != nil {
+		return nil, false, fmt.Errorf("trusted tokenizer requires a valid signed model catalog: %w", err)
+	}
+	if len(catalog.Models) == 0 {
+		return nil, false, errors.New("trusted tokenizer requires at least one model in the signed model catalog")
+	}
+	models := make([]trustedtokenizer.Model, 0, len(catalog.Models))
+	for _, manifest := range catalog.Models {
+		models = append(models, trustedtokenizer.Model{
+			ID: manifest.Model.ID, CatalogVersion: catalog.Version,
+			ContextTokens:   manifest.Model.ContextTokens,
+			TokenizerSHA256: manifest.TokenizerSHA256, TemplateSHA256: manifest.TemplateSHA256,
+		})
+	}
+	client, err := trustedtokenizer.NewClient(endpoint, token, models, roots)
+	if err != nil {
+		return nil, false, fmt.Errorf("configure trusted tokenizer: %w", err)
+	}
+	return client, true, nil
+}
+
+func tokenizerTLSRoots() (*x509.CertPool, error) {
+	path := strings.TrimSpace(os.Getenv("CORDOVA_TOKENIZER_CA_FILE"))
+	if path == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("tokenizer CA file could not be read")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil || len(data) == 0 || len(data) > 1<<20 {
+		return nil, errors.New("tokenizer CA file is empty, too large or could not be read")
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(data) {
+		return nil, errors.New("tokenizer CA file contains no valid certificates")
+	}
+	return roots, nil
+}
+
+func checkTokenizerReady(ctx context.Context, tokenizer request.Tokenizer) error {
+	checker, ok := tokenizer.(interface{ CheckReady(context.Context) error })
+	if !ok {
+		return nil
+	}
+	return checker.CheckReady(ctx)
 }
 
 func optionalSecretText(envName, fileName string) (string, bool, error) {

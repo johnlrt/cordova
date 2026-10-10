@@ -1,7 +1,12 @@
 // Package inference defines the boundary between HTTP and an inference executor.
 package inference
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var ErrContextExceeded = errors.New("model context limit exceeded")
 
 type Message struct {
 	Role    string `json:"role"`
@@ -9,9 +14,21 @@ type Message struct {
 }
 
 type Request struct {
-	Messages   []Message
-	MaxTokens  int
-	Parameters Parameters
+	Messages       []Message  `json:"messages"`
+	InputTokenIDs  []uint32   `json:"input_token_ids,omitempty"`
+	InputTokens    int64      `json:"input_tokens,omitempty"`
+	CatalogVersion string     `json:"catalog_version,omitempty"`
+	MaxTokens      int        `json:"max_tokens"`
+	Parameters     Parameters `json:"parameters"`
+}
+
+// PreparedInput is the trusted tokenizer's exact representation of one prompt.
+// Token IDs remain request-owned memory and are passed only to the node runner.
+type PreparedInput struct {
+	TokenIDs       []uint32
+	TokenCount     int64
+	ContextTokens  uint32
+	CatalogVersion string
 }
 
 // Parameters mirrors the validated generation controls in PLAN.md C2/C3.
