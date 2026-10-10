@@ -73,7 +73,7 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 		return nil, err
 	}
 	mux := http.NewServeMux()
-	catalog, err := parseNodeCatalog(cfg.NodeCatalogSnapshot, cfg.NodeCatalogPublicKey)
+	catalog, err := ParseNodeCatalog(cfg.NodeCatalogSnapshot, cfg.NodeCatalogPublicKey)
 	if err != nil {
 		return nil, err
 	}

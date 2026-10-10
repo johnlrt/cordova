@@ -48,6 +48,13 @@ type Tokenizer interface {
 	CountOutput(context.Context, string, string) (int64, error)
 }
 
+// InputPreparer returns the exact IDs used for routing when the authoritative
+// tokenizer supports the C9 prepare operation. Legacy mock tokenizers may only
+// implement Tokenizer and remain limited to non-billable test traffic.
+type InputPreparer interface {
+	PrepareInput(context.Context, string, []inference.Message) (inference.PreparedInput, error)
+}
+
 // Router returns an already claimed, session-bound attempt lease. A retry must
 // exclude every owner in excludedOwners and remain within deadline.
 type Router interface {
@@ -132,12 +139,49 @@ func (c *Coordinator) Execute(ctx context.Context, params Params, input inferenc
 	runCtx, cancel := context.WithDeadline(ctx, params.Deadline)
 	defer cancel()
 
-	inputTokens, err := c.tokenizer.CountInput(runCtx, params.ModelID, input.Messages)
-	if err != nil {
-		return Result{}, ErrTokenizerUnavailable
-	}
-	if inputTokens < 0 || inputTokens > maxInputTokens {
-		return Result{}, ErrInputLimit
+	var inputTokens int64
+	var err error
+	if preparer, ok := c.tokenizer.(InputPreparer); ok {
+		prepared, err := preparer.PrepareInput(runCtx, params.ModelID, input.Messages)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return Result{}, ErrClientCancelled
+			}
+			if errors.Is(err, inference.ErrContextExceeded) {
+				return Result{}, ErrInputLimit
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return Result{}, ErrTokenizerUnavailable
+			}
+			return Result{}, ErrTokenizerUnavailable
+		}
+		inputTokens = prepared.TokenCount
+		if inputTokens < 1 || inputTokens > maxInputTokens || len(prepared.TokenIDs) != int(inputTokens) ||
+			prepared.ContextTokens == 0 || prepared.ContextTokens > 32_768 || !domainID(prepared.CatalogVersion) {
+			return Result{}, ErrTokenizerUnavailable
+		}
+		for _, tokenID := range prepared.TokenIDs {
+			if tokenID > 2_147_483_647 {
+				return Result{}, ErrTokenizerUnavailable
+			}
+		}
+		if uint64(inputTokens)+uint64(input.MaxTokens) > uint64(prepared.ContextTokens) {
+			return Result{}, ErrInputLimit
+		}
+		input.InputTokenIDs = append([]uint32(nil), prepared.TokenIDs...)
+		input.InputTokens = inputTokens
+		input.CatalogVersion = prepared.CatalogVersion
+	} else {
+		inputTokens, err = c.tokenizer.CountInput(runCtx, params.ModelID, input.Messages)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return Result{}, ErrClientCancelled
+			}
+			return Result{}, ErrTokenizerUnavailable
+		}
+		if inputTokens < 0 || inputTokens > maxInputTokens {
+			return Result{}, ErrInputLimit
+		}
 	}
 
 	excludedOwners := make(map[string]struct{}, 1)

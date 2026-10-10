@@ -14,7 +14,7 @@ const nodeCatalogTestVersion = "00000000-0000-4000-8000-000000000002"
 
 func TestParseNodeCatalogVerifiesSignedManifest(t *testing.T) {
 	data, publicKey := signedNodeCatalogForTest(t)
-	snapshot, err := parseNodeCatalog(data, publicKey)
+	snapshot, err := ParseNodeCatalog(data, publicKey)
 	if err != nil {
 		t.Fatalf("parse signed catalog: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestParseNodeCatalogVerifiesSignedManifest(t *testing.T) {
 	}
 
 	wrongKey := ed25519.NewKeyFromSeed([]byte(strings.Repeat("w", ed25519.SeedSize)))
-	if _, err := parseNodeCatalog(data, wrongKey.Public().(ed25519.PublicKey)); err == nil {
+	if _, err := ParseNodeCatalog(data, wrongKey.Public().(ed25519.PublicKey)); err == nil {
 		t.Fatal("catalog signed by a different key was accepted")
 	}
 
@@ -36,7 +36,7 @@ func TestParseNodeCatalogVerifiesSignedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := parseNodeCatalog(tamperedData, publicKey); err == nil {
+	if _, err := ParseNodeCatalog(tamperedData, publicKey); err == nil {
 		t.Fatal("modified manifest was accepted")
 	}
 }
@@ -50,7 +50,7 @@ func TestNodeCatalogRustGoldenFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := parseNodeCatalog(data, ed25519.PublicKey(publicKey))
+	snapshot, err := ParseNodeCatalog(data, ed25519.PublicKey(publicKey))
 	if err != nil {
 		t.Fatalf("verify shared Go/Rust catalog vector: %v", err)
 	}
@@ -72,25 +72,25 @@ func TestParseNodeCatalogRejectsMalformedCatalogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := parseNodeCatalog(duplicateData, publicKey); err == nil {
+	if _, err := ParseNodeCatalog(duplicateData, publicKey); err == nil {
 		t.Fatal("duplicate model ID was accepted")
 	}
 
 	missing := strings.Replace(string(data), `"created":1,`, "", 1)
-	if _, err := parseNodeCatalog([]byte(missing), publicKey); err == nil {
+	if _, err := ParseNodeCatalog([]byte(missing), publicKey); err == nil {
 		t.Fatal("manifest missing a required field was accepted")
 	}
 
 	unknown := strings.Replace(string(data), `"version":"`+nodeCatalogVersion+`"`, `"version":"`+nodeCatalogVersion+`","unexpected":true`, 1)
-	if _, err := parseNodeCatalog([]byte(unknown), publicKey); err == nil {
+	if _, err := ParseNodeCatalog([]byte(unknown), publicKey); err == nil {
 		t.Fatal("catalog with an unknown field was accepted")
 	}
 	duplicateKey := strings.Replace(string(data), `"version":"`+nodeCatalogVersion+`"`, `"version":"`+nodeCatalogVersion+`","version":"`+nodeCatalogVersion+`"`, 1)
-	if _, err := parseNodeCatalog([]byte(duplicateKey), publicKey); err == nil {
+	if _, err := ParseNodeCatalog([]byte(duplicateKey), publicKey); err == nil {
 		t.Fatal("catalog with a duplicate JSON key was accepted")
 	}
 
-	if _, err := parseNodeCatalog(data, nil); err == nil {
+	if _, err := ParseNodeCatalog(data, nil); err == nil {
 		t.Fatal("configured catalog without a trust key was accepted")
 	}
 }
@@ -127,7 +127,7 @@ func TestParseNodeCatalogRejectsOversizedEncodedFrame(t *testing.T) {
 	if data.Len() >= MaxNodeCatalogBytes {
 		t.Fatalf("test catalog input unexpectedly large: %d", data.Len())
 	}
-	if _, err := parseNodeCatalog(data.Bytes(), publicKey); err == nil {
+	if _, err := ParseNodeCatalog(data.Bytes(), publicKey); err == nil {
 		t.Fatal("catalog whose JSON escaping exceeds the node frame limit was accepted")
 	}
 }
