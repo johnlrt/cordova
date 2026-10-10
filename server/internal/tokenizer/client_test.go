@@ -164,6 +164,35 @@ func TestClientPreservesHelperContextExceededError(t *testing.T) {
 	}
 }
 
+func TestNewClientRejectsUnsafeEndpointsAndModelIdentity(t *testing.T) {
+	model := Model{
+		ID: testModelID, CatalogVersion: testCatalog, ContextTokens: 64,
+		TokenizerSHA256: testTokenizerSHA, TemplateSHA256: testTemplateSHA,
+	}
+	cases := []struct {
+		name     string
+		endpoint string
+		token    string
+		models   []Model
+	}{
+		{name: "remote plaintext", endpoint: "http://tokenizer.example.test", token: strings.Repeat("s", 32), models: []Model{model}},
+		{name: "credentials in URL", endpoint: "https://user:pass@tokenizer.example.test", token: strings.Repeat("s", 32), models: []Model{model}},
+		{name: "query in URL", endpoint: "https://tokenizer.example.test?debug=1", token: strings.Repeat("s", 32), models: []Model{model}},
+		{name: "short helper token", endpoint: "https://tokenizer.example.test", token: "short", models: []Model{model}},
+		{name: "mixed catalog versions", endpoint: "https://tokenizer.example.test", token: strings.Repeat("s", 32), models: []Model{model, {
+			ID: "cordova-chat-medium-v1", CatalogVersion: "00000000-0000-4000-8000-000000000099", ContextTokens: 64,
+			TokenizerSHA256: testTokenizerSHA, TemplateSHA256: testTemplateSHA,
+		}}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewClient(test.endpoint, test.token, test.models, nil); err == nil {
+				t.Fatal("unsafe tokenizer configuration was accepted")
+			}
+		})
+	}
+}
+
 func newTestClient(t *testing.T, endpoint string) *Client {
 	t.Helper()
 	client, err := NewClient(endpoint, strings.Repeat("s", 32), []Model{{
