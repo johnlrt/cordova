@@ -202,6 +202,7 @@ def main() -> int:
             "/healthz", "/v1/models", "/v1/chat/completions",
             "/api/auth/register", "/api/auth/login", "/api/auth/recover", "/api/auth/logout",
             "/api/session", "/api/keys", "/api/keys/{id}", "/api/usage", "/api/billing/balance", "/api/requests/{id}",
+            "/api/nodes", "/api/nodes/link", "/api/nodes/{id}", "/api/nodes/{id}/revoke",
             "/api/live-ticket", "/api/live", "/api/node/enrollments", "/api/node/enrollments/token",
             "/api/node/enrollments/approve", "/api/node/auth/challenge", "/api/node/auth/token", "/api/node/ws",
         }
@@ -217,7 +218,8 @@ def main() -> int:
             raise ContractError("openapi.yaml: M1 account, key, usage or live-ticket schemas are incomplete")
         frontend_m1_schemas = {
             "AccountErrorResponse", "AccountSafeErrorFixtures", "SessionView", "LiveTicket",
-            "RegistrationResult", "UsagePage", "ApiKey", "Hardware", "NodeModel", "Node", "Balance",
+            "RegistrationResult", "UsagePage", "ApiKey", "Hardware", "NodeModel", "Node", "NodePage",
+            "NodeLinkRequest", "NodeRenameRequest", "Balance",
         }
         if not frontend_m1_schemas.issubset(schemas):
             raise ContractError(f"openapi.yaml: missing M1 frontend DTO schemas {sorted(frontend_m1_schemas - set(schemas))}")

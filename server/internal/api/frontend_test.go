@@ -17,6 +17,7 @@ func TestFrontendPreservesAPIAndRestrictsFiles(t *testing.T) {
 	}
 	for name, text := range map[string]string{
 		filepath.Join(build, "index.html"):       "<html>Cordova panel</html>",
+		filepath.Join(build, "200.html"):         "<html>Cordova client fallback</html>",
 		filepath.Join(build, "login.html"):       "<html>Login route</html>",
 		filepath.Join(build, "dashboard.html"):   "<html>Dashboard route</html>",
 		filepath.Join(build, "assets", "app.js"): "/* public asset */",
@@ -35,8 +36,9 @@ func TestFrontendPreservesAPIAndRestrictsFiles(t *testing.T) {
 		code          int
 	}{
 		{"GET", "/", 200}, {"GET", "/login", 200}, {"GET", "/dashboard", 200}, {"GET", "/assets/app.js", 200},
-		{"GET", "/assets/", 404}, {"GET", "/%2e%2e/secret.txt", 404},
-		{"GET", "/.local/api-key.txt", 404}, {"POST", "/", 405},
+		{"GET", "/assets/", 404}, {"GET", "/dashboard/nodes/706134d8-0590-437c-ab24-bb9c396c815b", 200},
+		{"GET", "/not-a-real-page", 200}, {"GET", "/%2e%2e/secret.txt", 404},
+		{"GET", "/.local/api-key.txt", 404}, {"GET", "/missing.js", 404}, {"POST", "/", 405},
 		{"GET", "/healthz", 200}, {"GET", "/v1/models", 401},
 		{"GET", "/api/session", 404}, {"POST", "/api/auth/login", 404},
 	} {

@@ -197,15 +197,19 @@ func TestNodeHTTPRoutesAreOptInAndPendingPollUses428(t *testing.T) {
 		t.Fatalf("create enrollment status=%d body=%s", createdResponse.Code, createdResponse.Body.String())
 	}
 	var created struct {
-		EnrollmentID string `json:"enrollment_id"`
-		UserCode     string `json:"user_code"`
-		DeviceCode   string `json:"device_code"`
+		EnrollmentID    string `json:"enrollment_id"`
+		UserCode        string `json:"user_code"`
+		DeviceCode      string `json:"device_code"`
+		VerificationURI string `json:"verification_uri"`
 	}
 	if err := json.Unmarshal(createdResponse.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
 	if created.EnrollmentID == "" || created.DeviceCode == "" || created.UserCode == "" {
 		t.Fatal("enrollment response omitted required codes")
+	}
+	if created.VerificationURI != config.Origin+"/dashboard/nodes" {
+		t.Fatalf("verification URI=%q, want authenticated node approval page", created.VerificationURI)
 	}
 	createdEnrollmentID, createdDeviceCode, createdUserCode = created.EnrollmentID, created.DeviceCode, created.UserCode
 

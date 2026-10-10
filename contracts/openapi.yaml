@@ -161,13 +161,13 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
-            "$ref": "#/components/responses/ModelNotFound"
+            "$ref": "#/components/responses/NotFound"
           },
           "429": {
             "$ref": "#/components/responses/Busy"
           },
           "503": {
-            "$ref": "#/components/responses/ExecutorUnavailable"
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1100,6 +1100,298 @@
         }
       }
     },
+    "/api/nodes": {
+      "get": {
+        "operationId": "listOwnedNodes",
+        "summary": "List the current account's active nodes",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active nodes owned by the session account, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/ExecutorUnavailable"
+          }
+        }
+      }
+    },
+    "/api/nodes/link": {
+      "post": {
+        "operationId": "linkOwnedNode",
+        "summary": "Approve and link one pending node",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 32
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeLinkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The newly linked node. Unmeasured and unreported values are null.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "410": {
+            "description": "The one-time enrollment code has expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/nodes/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Id"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getOwnedNode",
+        "summary": "Get one node owned by the current account",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The owned node detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "renameOwnedNode",
+        "summary": "Rename a node owned by the current account",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 32
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeRenameRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The authoritative node after rename.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/nodes/{id}/revoke": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Id"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "revokeOwnedNode",
+        "summary": "Revoke a node and fence its current session",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 32
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "The node was revoked."
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/api/node/enrollments": {
       "post": {
         "operationId": "createNodeEnrollment",
@@ -1454,6 +1746,64 @@
       },
       "ModelNotFound": {
         "description": "The requested model is not in the catalog.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The request failed its session permission, origin or CSRF check.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "The requested account-owned node does not exist.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "The enrollment is no longer pending.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "The operation is rate limited.",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "The requested service is temporarily unavailable.",
         "content": {
           "application/json": {
             "schema": {
@@ -3017,23 +3367,48 @@
             ]
           },
           "rank": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0,
-            "maximum": 100
+            "maximum": 100,
+            "description": "Null until the M4A rank projection has produced a verified score."
           },
           "rank_updated_at": {
-            "$ref": "#/components/schemas/Timestamp"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Null until a rank score exists."
           },
           "hardware": {
-            "$ref": "#/components/schemas/Hardware"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Hardware"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null until the node reports hardware over its authenticated C3 session."
           },
           "verified_capacity_bytes": {
-            "type": "integer",
-            "minimum": 0
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Null until a server capacity challenge verifies a lower bound."
           },
           "measured_tokens_per_second": {
-            "type": "number",
-            "minimum": 0
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Null until a server-side benchmark records throughput."
           },
           "latency_ms": {
             "type": [
@@ -3043,14 +3418,22 @@
             "minimum": 0
           },
           "uptime_ratio": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "minimum": 0,
-            "maximum": 1
+            "maximum": 1,
+            "description": "Null until a sufficiently sampled reliability window exists."
           },
           "success_ratio": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "minimum": 0,
-            "maximum": 1
+            "maximum": 1,
+            "description": "Null until a sufficiently sampled request window exists."
           },
           "last_seen_at": {
             "type": [
@@ -3066,10 +3449,26 @@
             }
           },
           "earnings_pending_piconero": {
-            "$ref": "#/components/schemas/Money"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Money"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null until M3 node-level earnings are available."
           },
           "earnings_available_piconero": {
-            "$ref": "#/components/schemas/Money"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Money"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null until M3 node-level earnings are available."
           },
           "hold_until": {
             "type": [
@@ -3077,6 +3476,63 @@
               "null"
             ],
             "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NodeLinkRequest": {
+        "type": "object",
+        "required": [
+          "user_code",
+          "name"
+        ],
+        "properties": {
+          "user_code": {
+            "type": "string",
+            "pattern": "^[A-Z2-7]{5}-[A-Z2-7]{5}-[A-Z2-7]{3}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "additionalProperties": false
+      },
+      "NodeRenameRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "additionalProperties": false
+      },
+      "NodePage": {
+        "type": "object",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
           }
         },
         "additionalProperties": false

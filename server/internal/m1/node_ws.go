@@ -158,6 +158,10 @@ func (s *nodeService) recordNodeHeartbeat(ctx context.Context, identity nodeIden
 	if err != nil {
 		return err
 	}
+	hardware, err := json.Marshal(heartbeat.Payload.Hardware)
+	if err != nil {
+		return err
+	}
 	result, err := s.redis.Eval(ctx, `
 local session_type=redis.call('TYPE',KEYS[1]).ok
 local node_type=redis.call('TYPE',KEYS[2]).ok
@@ -166,9 +170,13 @@ if session_type~='string' or node_type~='string' or (heartbeat_type~='none' and 
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return 0 end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
 if not ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false then return 0 end
+node['hardware']=cjson.decode(ARGV[8])
+node['last_seen_at']=ARGV[9]
+redis.call('SET',KEYS[2],cjson.encode(node))
 redis.call('SET',KEYS[3],ARGV[6],'EX',ARGV[7])
 return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID)},
-		sessionID, identity.Generation, identity.NodeID, identity.OwnerID, identity.SecretVersion, string(encoded), int64(nodeHeartbeatLimit.Seconds())).Int()
+		sessionID, identity.Generation, identity.NodeID, identity.OwnerID, identity.SecretVersion, string(encoded),
+		int64(nodeHeartbeatLimit.Seconds()), string(hardware), heartbeat.Received).Int()
 	if err != nil {
 		return err
 	}
@@ -323,6 +331,15 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 	peer := newNodePeer(conn, identity, sessionID, outputSeq)
 	h.nodes.attachPeer(peer)
 	defer h.nodes.detachPeer(peer)
+	current, currentErr := h.nodes.nodeSessionCurrent(ctx, identity, sessionID)
+	if currentErr != nil {
+		nodeClose(conn, websocket.CloseInternalServerErr, "unavailable")
+		return
+	}
+	if !current {
+		nodeClose(conn, 4001, "stale session")
+		return
+	}
 	lastHeartbeat := now
 	var lastPong atomic.Int64
 	lastPong.Store(now.UnixNano())

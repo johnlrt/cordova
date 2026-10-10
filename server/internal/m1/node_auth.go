@@ -51,16 +51,18 @@ type nodeService struct {
 }
 
 type nodeRecord struct {
-	ID            string `json:"id"`
-	OwnerID       string `json:"owner_id"`
-	Name          string `json:"name"`
-	HWIDHash      string `json:"hwid_hash"`
-	NodeVersion   string `json:"node_version"`
-	SecretCipher  string `json:"secret_ciphertext"`
-	SecretVersion int64  `json:"secret_version"`
-	Revoked       bool   `json:"revoked"`
-	CreatedAt     string `json:"created_at"`
-	ApprovedAt    string `json:"approved_at"`
+	ID            string        `json:"id"`
+	OwnerID       string        `json:"owner_id"`
+	Name          string        `json:"name"`
+	HWIDHash      string        `json:"hwid_hash"`
+	NodeVersion   string        `json:"node_version"`
+	SecretCipher  string        `json:"secret_ciphertext"`
+	SecretVersion int64         `json:"secret_version"`
+	Revoked       bool          `json:"revoked"`
+	CreatedAt     string        `json:"created_at"`
+	ApprovedAt    string        `json:"approved_at"`
+	Hardware      *nodeHardware `json:"hardware,omitempty"`
+	LastSeenAt    string        `json:"last_seen_at,omitempty"`
 }
 
 type nodeIdentity struct {

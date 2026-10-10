@@ -123,88 +123,108 @@ return 1`, []string{nodeEnrollmentPrefix + record.ID,
 		return nodeEnrollmentCreated{}, errors.New("node enrollment identifier collision")
 	}
 	return nodeEnrollmentCreated{EnrollmentID: record.ID, UserCode: userCode, DeviceCode: deviceCode,
-		VerificationURI: s.origin + "/pilot#nodes", ExpiresAt: expires, PollIntervalSeconds: 5}, nil
+		VerificationURI: s.origin + "/dashboard/nodes", ExpiresAt: expires, PollIntervalSeconds: 5}, nil
 }
 
 func (s *nodeService) approveEnrollment(ctx context.Context, accountID, userCode string) error {
+	_, err := s.approveEnrollmentWithName(ctx, accountID, userCode, "")
+	return err
+}
+
+func (s *nodeService) approveEnrollmentWithName(ctx context.Context, accountID, userCode, name string) (nodeRecord, error) {
 	if !validID(accountID) {
-		return ErrNodeUnauthorized
+		return nodeRecord{}, ErrNodeUnauthorized
 	}
 	if err := s.allow(ctx, s.nodeRateKey("approve", accountID), 10); err != nil {
-		return err
+		return nodeRecord{}, err
 	}
 	userCode = strings.ToUpper(strings.TrimSpace(userCode))
-	if !validNodeText(userCode, 32) || strings.Count(userCode, "-") != 2 {
-		return ErrInvalid
+	if !validNodeText(userCode, 32) || strings.Count(userCode, "-") != 2 || (name != "" && !validNodeText(name, 64)) {
+		return nodeRecord{}, ErrInvalid
 	}
 	userVerifier := s.verifier("node-user-v1", userCode)
 	indexKey := nodeEnrollmentUserKey + userVerifier
 	enrollmentID, err := s.redis.Get(ctx, indexKey).Result()
 	if err == redis.Nil {
-		return ErrNodeExpired
+		return nodeRecord{}, ErrNodeExpired
 	}
 	if err != nil {
-		return err
+		return nodeRecord{}, err
 	}
 	data, err := s.redis.Get(ctx, nodeEnrollmentPrefix+enrollmentID).Bytes()
 	if err == redis.Nil {
-		return ErrNodeExpired
+		return nodeRecord{}, ErrNodeExpired
 	}
 	if err != nil {
-		return err
+		return nodeRecord{}, err
 	}
 	var record nodeEnrollmentRecord
 	if decodeStrictBytes(data, &record) != nil || record.ID != enrollmentID || record.UserVerifier != userVerifier ||
 		!validID(record.NodeID) || record.Status != "pending" {
-		return ErrNodeConflict
+		return nodeRecord{}, ErrNodeConflict
 	}
 	expires, err := time.Parse(time.RFC3339Nano, record.ExpiresAt)
 	if err != nil || !expires.After(time.Now()) {
-		return ErrNodeExpired
+		return nodeRecord{}, ErrNodeExpired
+	}
+	if name != "" {
+		record.NodeName = name
 	}
 	now := time.Now().UTC()
+	dailyApprovalKey := s.nodeRateKey("approve-daily", accountID+"\n"+now.Format("2006-01-02"))
 	record.Status, record.OwnerID = "approved", accountID
 	record.ApprovedAt = now.Format(time.RFC3339Nano)
 	record.TokenReadUntil = now.Add(nodeEnrollmentTTL).Format(time.RFC3339Nano)
 	updated, err := json.Marshal(record)
 	if err != nil {
-		return err
+		return nodeRecord{}, err
 	}
 	node := nodeRecord{ID: record.NodeID, OwnerID: accountID, Name: record.NodeName, HWIDHash: record.HWIDHash,
 		NodeVersion: record.NodeVersion, SecretCipher: record.SecretCipher, SecretVersion: 1, CreatedAt: record.CreatedAt,
 		ApprovedAt: record.ApprovedAt}
+	member, err := nodeIndexMember(node)
+	if err != nil {
+		return nodeRecord{}, err
+	}
 	nodeData, err := json.Marshal(node)
 	if err != nil {
-		return err
+		return nodeRecord{}, err
 	}
 	result, err := s.redis.Eval(ctx, `
 local enrollment_type=redis.call('TYPE',KEYS[1]).ok
 local node_type=redis.call('TYPE',KEYS[2]).ok
 local device_type=redis.call('TYPE',KEYS[3]).ok
 local user_type=redis.call('TYPE',KEYS[4]).ok
-if enrollment_type~='string' or (node_type~='none' and node_type~='string') or (device_type~='none' and device_type~='string') or user_type~='string' then return redis.error_reply('node approval key type mismatch') end
+local index_type=redis.call('TYPE',KEYS[5]).ok
+local daily_type=redis.call('TYPE',KEYS[6]).ok
+if enrollment_type~='string' or (node_type~='none' and node_type~='string') or (device_type~='none' and device_type~='string') or user_type~='string' or (index_type~='none' and index_type~='zset') or (daily_type~='none' and daily_type~='string') then return redis.error_reply('node approval key type mismatch') end
 local ok,current=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(current)~='table' or current['id']~=ARGV[1] or current['node_id']~=ARGV[2] or current['user_verifier']~=ARGV[3] then return -1 end
 if current['status']~='pending' then return 0 end
 if tonumber(current['expires_at_unix'])<=tonumber(ARGV[6]) then return -1 end
 if redis.call('EXISTS',KEYS[2])==1 then return redis.error_reply('node identifier already exists') end
+if tonumber(redis.call('GET',KEYS[6]) or '0')>=100 then return -2 end
+if redis.call('INCR',KEYS[6])==1 then redis.call('EXPIRE',KEYS[6],ARGV[10]) end
 redis.call('SET',KEYS[2],ARGV[4])
 redis.call('SET',KEYS[1],ARGV[5],'EX',ARGV[7])
 redis.call('SET',KEYS[3],ARGV[8],'EX',ARGV[7])
 redis.call('DEL',KEYS[4])
+redis.call('ZADD',KEYS[5],0,ARGV[9])
 return 1`, []string{nodeEnrollmentPrefix + enrollmentID, nodeRecordKey(record.NodeID),
-		nodeEnrollmentDeviceKey + record.DeviceVerifier, indexKey}, enrollmentID, record.NodeID, userVerifier,
-		string(nodeData), string(updated), now.Unix(), int64(nodeEnrollmentTTL.Seconds()), enrollmentID).Int()
+		nodeEnrollmentDeviceKey + record.DeviceVerifier, indexKey, nodeOwnerIndexKey(accountID), dailyApprovalKey}, enrollmentID, record.NodeID, userVerifier,
+		string(nodeData), string(updated), now.Unix(), int64(nodeEnrollmentTTL.Seconds()), enrollmentID, member, int64(48*time.Hour/time.Second)).Int()
 	if err != nil {
-		return err
+		return nodeRecord{}, err
 	}
 	switch result {
 	case 1:
-		return nil
+		return node, nil
 	case -1:
-		return ErrNodeExpired
+		return nodeRecord{}, ErrNodeExpired
+	case -2:
+		return nodeRecord{}, ErrNodeThrottled
 	default:
-		return ErrNodeConflict
+		return nodeRecord{}, ErrNodeConflict
 	}
 }
 
