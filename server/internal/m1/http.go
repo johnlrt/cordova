@@ -22,6 +22,7 @@ type Handler struct {
 	store        *Store
 	cfg          Config
 	nodes        *nodeService
+	catalog      NodeCatalogSnapshot
 	ledger       AccountingReader
 	authenticate api.Authenticator
 	requests     *api.RequestRegistry
@@ -72,7 +73,11 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 		return nil, err
 	}
 	mux := http.NewServeMux()
-	h := &Handler{store: store, cfg: cfg, ledger: ledger, authenticate: store.Authenticate, requests: requests}
+	catalog, err := parseNodeCatalog(cfg.NodeCatalogSnapshot, cfg.NodeCatalogPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	h := &Handler{store: store, cfg: cfg, catalog: catalog, ledger: ledger, authenticate: store.Authenticate, requests: requests}
 	if len(cfg.NodeSecretEncryptionKey) > 0 || len(cfg.NodeJWTSigningKey) > 0 {
 		h.nodes, err = newNodeService(store.redis, cfg)
 		if err != nil {

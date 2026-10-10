@@ -323,7 +323,7 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 	inputSeq, outputSeq := uint32(2), uint32(1)
 	if err := writeNodeEnvelope(conn, &outputSeq, "welcome", nil, &sessionID, map[string]any{
 		"session_id": sessionID, "heartbeat_interval_ms": int(nodeHeartbeatPeriod / time.Millisecond),
-		"heartbeat_timeout_ms": int(nodeHeartbeatLimit / time.Millisecond), "catalog_version": nodeCatalogVersion,
+		"heartbeat_timeout_ms": int(nodeHeartbeatLimit / time.Millisecond), "catalog_version": h.catalog.Version,
 		"max_frame_bytes": 1 << 20, "connection_expires_at": expires.Format(time.RFC3339Nano),
 	}); err != nil {
 		return
@@ -475,11 +475,10 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid catalog request")
 				return
 			}
-			snapshot := map[string]any{"version": nodeCatalogVersion, "models": []any{}}
-			if peer.send("catalog.snapshot", nullableUUID(frame.RequestID), snapshot) != nil {
+			if peer.send("catalog.snapshot", nullableUUID(frame.RequestID), h.catalog) != nil {
 				return
 			}
-			replies[frame.MessageID] = cachedNodeReply{Type: "catalog.snapshot", RequestID: nullableUUID(frame.RequestID), Payload: snapshot}
+			replies[frame.MessageID] = cachedNodeReply{Type: "catalog.snapshot", RequestID: nullableUUID(frame.RequestID), Payload: h.catalog}
 		case "model.state":
 			var model nodeModelStatePayload
 			if decodeNodePayload(frame.Payload, &model, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code") != nil ||

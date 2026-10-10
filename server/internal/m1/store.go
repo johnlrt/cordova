@@ -52,6 +52,8 @@ type Config struct {
 	Pepper                  []byte
 	NodeSecretEncryptionKey []byte
 	NodeJWTSigningKey       ed25519.PrivateKey
+	NodeCatalogSnapshot     []byte
+	NodeCatalogPublicKey    ed25519.PublicKey
 	SecureCookies           bool
 	TrustProxy              bool
 	UsagePendingKey         string

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,6 +43,10 @@ func runM1(address string) error {
 	if err != nil {
 		return err
 	}
+	catalogSnapshot, catalogPublicKey, err := nodeCatalogConfig()
+	if err != nil {
+		return err
+	}
 	redisURL := strings.TrimSpace(os.Getenv("CORDOVA_REDIS_URL"))
 	if redisURL == "" {
 		return errors.New("CORDOVA_REDIS_URL is required in M1 mode")
@@ -64,6 +69,7 @@ func runM1(address string) error {
 	defer rdb.Close()
 	config := m1.Config{Origin: origin, PrivacyNoticeVersion: notice, Pepper: pepper,
 		NodeSecretEncryptionKey: nodeEncryptionKey, NodeJWTSigningKey: nodeSigningKey,
+		NodeCatalogSnapshot: catalogSnapshot, NodeCatalogPublicKey: catalogPublicKey,
 		SecureCookies: true, TrustProxy: strings.EqualFold(os.Getenv("CORDOVA_TRUST_PROXY"), "true")}
 	store, err := m1.NewStore(rdb, config)
 	if err != nil {
@@ -262,6 +268,37 @@ func nodeAPIKeys() ([]byte, ed25519.PrivateKey, error) {
 		return nil, nil, errors.New("node JWT signing key must encode an Ed25519 seed or private key")
 	}
 	return encryptionKey, ed25519.NewKeyFromSeed(seed), nil
+}
+
+func nodeCatalogConfig() ([]byte, ed25519.PublicKey, error) {
+	path := strings.TrimSpace(os.Getenv("CORDOVA_MODEL_CATALOG_FILE"))
+	keyText, keySet, err := optionalSecretText("CORDOVA_MODEL_CATALOG_PUBLIC_KEY", "CORDOVA_MODEL_CATALOG_PUBLIC_KEY_FILE")
+	if err != nil {
+		return nil, nil, err
+	}
+	if path == "" && !keySet {
+		return nil, nil, nil
+	}
+	if path == "" || !keySet {
+		return nil, nil, errors.New("CORDOVA_MODEL_CATALOG_FILE and CORDOVA_MODEL_CATALOG_PUBLIC_KEY (or _FILE) must be configured together")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, errors.New("model catalog file could not be read")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, m1.MaxNodeCatalogBytes+1))
+	if err != nil || len(data) > m1.MaxNodeCatalogBytes {
+		return nil, nil, errors.New("model catalog file exceeds the safe WebSocket frame limit or could not be read")
+	}
+	if len(data) == 0 {
+		return nil, nil, errors.New("model catalog file is empty")
+	}
+	key, err := decodeFixedKey(keyText, ed25519.PublicKeySize)
+	if err != nil {
+		return nil, nil, errors.New("model catalog public key must encode exactly 32 bytes")
+	}
+	return data, ed25519.PublicKey(key), nil
 }
 
 func optionalSecretText(envName, fileName string) (string, bool, error) {

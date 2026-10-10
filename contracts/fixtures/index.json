@@ -170,6 +170,11 @@
     "valid": true
   },
   {
+    "file": "ws/node-catalog-snapshot.json",
+    "schema": "ws/v1.schema.json#/$defs/CatalogSnapshotPayload",
+    "valid": true
+  },
+  {
     "file": "ws/live-auth.json",
     "schema": "ws/v1.schema.json#",
     "valid": true
