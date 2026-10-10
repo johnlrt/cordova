@@ -210,7 +210,7 @@ mod tests {
         let snapshot: crate::protocol::CatalogSnapshot = serde_json::from_str(include_str!(
             "../../contracts/fixtures/ws/node-catalog-snapshot.json"
         ))
-        .expect("shared catalog fixture parses");
+            .expect("shared catalog fixture parses");
         assert_eq!(snapshot.version, "00000000-0000-4000-8000-000000000002");
         assert_eq!(snapshot.models.len(), 1);
         snapshot.models[0].verify(&config).expect("Go signature verifies in Rust");
