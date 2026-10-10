@@ -31,7 +31,7 @@ const liveClientFrameSchema = { allOf: [{ oneOf: clientBranches }, ...liveInvari
 
 const openApiRoots = [
   'AccountErrorResponse', 'AccountSafeErrorFixtures', 'SessionView', 'LiveTicket', 'RegistrationResult', 'UsagePage',
-  'Node', 'ApiKey', 'Balance'
+  'Node', 'ApiKey', 'APIKeyList', 'APIKeyCreateResponse', 'Balance'
 ];
 const openApiNames = dependencyNames(openApi.components.schemas, openApiRoots);
 const wsRefs = collectRefs([liveServerFrameSchema, liveClientFrameSchema]);
