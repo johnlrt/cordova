@@ -42,8 +42,16 @@ func WithFrontend(api http.Handler, directory string) (http.Handler, error) {
 			}
 		}
 		if err != nil {
-			http.NotFound(w, r)
-			return
+			if path.Ext(name) != "" {
+				http.NotFound(w, r)
+				return
+			}
+			fallback, fallbackErr := fs.Stat(files, "200.html")
+			if fallbackErr != nil || !fallback.Mode().IsRegular() {
+				http.NotFound(w, r)
+				return
+			}
+			name, info, r.URL.Path = "200.html", fallback, "/200.html"
 		}
 		if info.IsDir() {
 			index, err := fs.Stat(files, path.Join(name, "index.html"))

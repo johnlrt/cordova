@@ -149,7 +149,7 @@ Reject unknown fields in Cordova REST/WS payloads. In `/v1/chat/completions`, re
 | `ApiKey` | `id`, `name` ≤64 chars, `prefix`, `permissions` subset of `chat:write,models:read,usage:read`, `model_ids` nonempty slug array, `daily_spend_cap_piconero:Money`, `created_at`, `last_used_at` timestamp/null, `revoked_at` timestamp/null |
 | `Hardware` | `platform:linux|windows|macos`, `arch:x86_64|aarch64`, `backend:cuda|metal|vulkan|cpu`, `gpu_name` string/null, `reported_total_vram_bytes`, `reported_free_vram_bytes`, `ram_bytes`; no serial numbers |
 | `NodeModel` | `model_id`, `state:loaded|on_disk|absent|downloading|loading|failed`, `active_slots`, `max_slots`, `verified_capacity_bytes`, `updated_at` |
-| `Node` | `id`, `name`, `status:enrolling|benchmarking|online|busy|warming|offline|draining|quarantined`, `rank`, `rank_updated_at`, `hardware:Hardware`, `verified_capacity_bytes`, `measured_tokens_per_second`, `latency_ms`, `uptime_ratio`, `success_ratio`, `last_seen_at` timestamp/null, `models:NodeModel[]`, `earnings_pending_piconero:Money`, `earnings_available_piconero:Money`, `hold_until` timestamp/null |
+| `Node` | `id`, `name`, `status:enrolling|benchmarking|online|busy|warming|offline|draining|quarantined`, `rank:int|null`, `rank_updated_at` timestamp/null, `hardware:Hardware|null`, `verified_capacity_bytes:uint64|null`, `measured_tokens_per_second:number|null`, `latency_ms:uint64|null`, `uptime_ratio:number|null`, `success_ratio:number|null`, `last_seen_at` timestamp/null, `models:NodeModel[]`, `earnings_pending_piconero:Money|null`, `earnings_available_piconero:Money|null`, `hold_until` timestamp/null. Use null until the corresponding trusted measurement, rank or ledger projection exists; never substitute zero for unavailable data. Hardware remains explicitly self-reported until verified. |
 | `Balance` | `available_piconero`, `reserved_piconero`, `earnings_pending_piconero`, `earnings_available_piconero`, `payout_reserved_piconero`, `currency:"XMR"`, `updated_at`; every balance field is `Money` |
 | `DepositAddress` | `address`, `network:stagenet|mainnet`, `confirmations_required`, `uri` (Monero payment URI, no embedded amount), `created_at` |
 | `Deposit` | `id`, `txid:Hash`, `amount_piconero:Money`, `confirmations`, `status:pending|credited|reversed|locked`, `observed_at`, `credited_at` timestamp/null |
@@ -579,6 +579,7 @@ All decisions are resolved defaults; alternatives show the reversal cost, not qu
 ## Changelog
 
 - v1, 2026-10-08: Establish Cordova architecture, shared contracts and resolved assumptions; separate execution ownership into three linked plans.
+- 2026-10-10: Clarify that node telemetry, rank and earnings are nullable until measured or projected; do not render synthetic zero values as evidence.
 
 ## Open risks
 

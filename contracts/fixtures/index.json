@@ -75,6 +75,31 @@
     "valid": false
   },
   {
+    "file": "rest/node-unmeasured.json",
+    "schema": "openapi.yaml#/components/schemas/Node",
+    "valid": true
+  },
+  {
+    "file": "rest/node-page.json",
+    "schema": "openapi.yaml#/components/schemas/NodePage",
+    "valid": true
+  },
+  {
+    "file": "rest/node-link-request.json",
+    "schema": "openapi.yaml#/components/schemas/NodeLinkRequest",
+    "valid": true
+  },
+  {
+    "file": "rest/node-link-request-invalid-code.json",
+    "schema": "openapi.yaml#/components/schemas/NodeLinkRequest",
+    "valid": false
+  },
+  {
+    "file": "rest/node-rename-request.json",
+    "schema": "openapi.yaml#/components/schemas/NodeRenameRequest",
+    "valid": true
+  },
+  {
     "file": "rest/key-valid.json",
     "schema": "openapi.yaml#/components/schemas/ApiKey",
     "valid": true

@@ -103,6 +103,10 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 	mux.HandleFunc("/api/live-ticket", h.liveTicket)
 	mux.HandleFunc("/api/live", h.live)
 	if h.nodes != nil {
+		mux.HandleFunc("/api/nodes", h.nodesInventory)
+		mux.HandleFunc("/api/nodes/link", h.linkNode)
+		mux.HandleFunc("/api/nodes/{id}", h.nodeDetail)
+		mux.HandleFunc("/api/nodes/{id}/revoke", h.revokeNode)
 		mux.HandleFunc("/api/node/enrollments", h.createNodeEnrollment)
 		mux.HandleFunc("/api/node/enrollments/token", h.pollNodeEnrollment)
 		mux.HandleFunc("/api/node/enrollments/approve", h.approveNodeEnrollment)

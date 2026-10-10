@@ -1,6 +1,6 @@
 import { ApiFailure } from './client.ts';
 import { matchesOpenApi } from './generated/contracts.ts';
-import type { AccountErrorResponse, LiveTicket, RegistrationResult, SessionView } from './generated/contracts.ts';
+import type { AccountErrorResponse, LiveTicket, Node, NodePage, RegistrationResult, SessionView } from './generated/contracts.ts';
 export type { Account, RegistrationResult, SessionView } from './generated/contracts.ts';
 export function decodeSession(value: unknown): SessionView {
   if (!matchesOpenApi(value, 'SessionView')) throw new ApiFailure('invalid_response');
@@ -24,7 +24,7 @@ function decodeError(response: Response, value: unknown): ApiFailure {
 }
 
 async function accountRequest(path: string, options: {
-  method?: 'GET' | 'POST'; body?: Record<string, unknown>; csrfToken?: string; signal?: AbortSignal; expectedStatus?: number;
+  method?: 'GET' | 'POST' | 'PATCH'; body?: Record<string, unknown>; csrfToken?: string; signal?: AbortSignal; expectedStatus?: number;
 } = {}): Promise<unknown> {
   if (!path.startsWith('/api/') || path.startsWith('//') || path.includes('\\')) throw new ApiFailure('invalid_request');
   let url: URL;
@@ -104,5 +104,61 @@ export async function approveNodeEnrollment(userCode: string, csrfToken: string,
   if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
   await accountRequest('/api/node/enrollments/approve', {
     method: 'POST', body: { user_code: normalizedCode }, csrfToken, signal, expectedStatus: 204
+  });
+}
+
+function nodeIdPath(nodeID: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(nodeID)) {
+    throw new ApiFailure('invalid_request');
+  }
+  return encodeURIComponent(nodeID);
+}
+
+export async function fetchNodes(limit = 50, cursor?: string, signal?: AbortSignal): Promise<NodePage> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== undefined && (!cursor || cursor.length > 512))) {
+    throw new ApiFailure('invalid_request');
+  }
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor) query.set('cursor', cursor);
+  const value = await accountRequest(`/api/nodes?${query}`, { signal, expectedStatus: 200 });
+  if (!matchesOpenApi(value, 'NodePage')) throw new ApiFailure('invalid_response');
+  return value as NodePage;
+}
+
+export async function fetchNode(nodeID: string, signal?: AbortSignal): Promise<Node> {
+  const value = await accountRequest(`/api/nodes/${nodeIdPath(nodeID)}`, { signal, expectedStatus: 200 });
+  if (!matchesOpenApi(value, 'Node')) throw new ApiFailure('invalid_response');
+  return value as Node;
+}
+
+export async function linkNode(userCode: string, name: string, csrfToken: string, signal?: AbortSignal): Promise<Node> {
+  const normalizedCode = userCode.trim().toUpperCase();
+  const normalizedName = name.trim();
+  if (!/^[A-Z2-7]{5}-[A-Z2-7]{5}-[A-Z2-7]{3}$/.test(normalizedCode) || !normalizedName || normalizedName.length > 64) {
+    throw new ApiFailure('invalid_request');
+  }
+  if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
+  const value = await accountRequest('/api/nodes/link', {
+    method: 'POST', body: { user_code: normalizedCode, name: normalizedName }, csrfToken, signal, expectedStatus: 201
+  });
+  if (!matchesOpenApi(value, 'Node')) throw new ApiFailure('invalid_response');
+  return value as Node;
+}
+
+export async function renameNode(nodeID: string, name: string, csrfToken: string, signal?: AbortSignal): Promise<Node> {
+  const normalizedName = name.trim();
+  if (!normalizedName || normalizedName.length > 64) throw new ApiFailure('invalid_request');
+  if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
+  const value = await accountRequest(`/api/nodes/${nodeIdPath(nodeID)}`, {
+    method: 'PATCH', body: { name: normalizedName }, csrfToken, signal, expectedStatus: 200
+  });
+  if (!matchesOpenApi(value, 'Node')) throw new ApiFailure('invalid_response');
+  return value as Node;
+}
+
+export async function revokeNode(nodeID: string, csrfToken: string, signal?: AbortSignal): Promise<void> {
+  if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
+  await accountRequest(`/api/nodes/${nodeIdPath(nodeID)}/revoke`, {
+    method: 'POST', body: {}, csrfToken, signal, expectedStatus: 204
   });
 }
