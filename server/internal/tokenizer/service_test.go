@@ -235,7 +235,28 @@ func TestServiceBoundsPerModelConcurrencyAndQueueWait(t *testing.T) {
 func testServiceModel() Model {
 	return Model{
 		ID: testModelID, CatalogVersion: testCatalog, ContextTokens: 64, AddBOS: true,
+		ArtifactURL: "https://models.example.test/cordova-chat-small-v1.gguf", ArtifactSHA256: strings.Repeat("c", 64),
+		ArtifactSizeBytes: 1024, LlamaCommit: strings.Repeat("d", 40),
 		TokenizerSHA256: testTokenizerSHA, TemplateSHA256: testTemplateSHA,
+	}
+}
+
+func TestNewServiceRequiresCompleteModelArtifactIdentity(t *testing.T) {
+	model := testServiceModel()
+	cases := []Model{
+		func() Model { value := model; value.ArtifactSHA256 = ""; return value }(),
+		func() Model {
+			value := model
+			value.ArtifactURL = "http://models.example.test/model.gguf"
+			return value
+		}(),
+		func() Model { value := model; value.LlamaCommit = "abcd"; return value }(),
+		func() Model { value := model; value.ArtifactSizeBytes = 0; return value }(),
+	}
+	for i, invalid := range cases {
+		if _, err := NewService(testCatalog, serviceToken, []Model{invalid}, nil); err == nil {
+			t.Fatalf("invalid model artifact identity %d was accepted", i)
+		}
 	}
 }
 

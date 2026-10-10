@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,8 +82,13 @@ func NewService(catalogVersion, helperToken string, models []Model, runtime Runt
 	configured := make(map[string]Model, len(models))
 	limiters := make(map[string]*modelLimiter, len(models))
 	for _, model := range models {
+		artifactURL, urlErr := url.Parse(model.ArtifactURL)
 		if !validModelID(model.ID) || model.CatalogVersion != catalogVersion || model.ContextTokens == 0 ||
-			model.ContextTokens > maxContextTokens || !validHash(model.TokenizerSHA256) || !validHash(model.TemplateSHA256) {
+			model.ContextTokens > maxContextTokens || !validHash(model.TokenizerSHA256) || !validHash(model.TemplateSHA256) ||
+			!validHash(model.ArtifactSHA256) || model.ArtifactSizeBytes == 0 || model.ArtifactSizeBytes > 1<<50 ||
+			!validCommit(model.LlamaCommit) || urlErr != nil || artifactURL.Scheme != "https" ||
+			artifactURL.Hostname() == "" || artifactURL.Path == "" || artifactURL.User != nil || artifactURL.Fragment != "" ||
+			artifactURL.Port() != "" && artifactURL.Port() != "443" {
 			return nil, errors.New("tokenizer service model identity is invalid")
 		}
 		if _, exists := configured[model.ID]; exists {
@@ -302,6 +308,18 @@ func decodeServiceMessages(input []serviceMessage) ([]inference.Message, bool) {
 		return nil, false
 	}
 	return messages, true
+}
+
+func validCommit(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) acquire(ctx context.Context, modelID string) (func(), error) {
