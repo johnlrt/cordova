@@ -49,7 +49,7 @@ func NewEvents(client *redis.Client, brokers string) (*Events, error) {
 	}
 	seeds := strings.Split(brokers, ",")
 	auth := plain.Auth{User: username, Pass: password}.AsMechanism()
-	producer, err := kgo.NewClient(kgo.SeedBrokers(seeds...), kgo.SASL(auth), kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordRetries(8))
+	producer, err := kgo.NewClient(kgo.SeedBrokers(seeds...), kgo.SASL(auth), kgo.ProducerBatchCompression(kgo.NoCompression()), kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordRetries(8))
 	if err != nil {
 		return nil, fmt.Errorf("configure Kafka producer: %w", err)
 	}
