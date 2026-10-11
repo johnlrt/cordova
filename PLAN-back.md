@@ -233,7 +233,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - **BN3 (B1/B2):** Build auth, gateway and mock-node SSE slice. **Done when:** `make smoke` returns the shared completion/usage flow through nginx and Kafka.
 - **BN4 (B4/B7):** Begin independent Rust transport and Redis ledger queues. **Done when:** narrow transport/replay and balance/conservation tests pass before real money integration.
 - **BN5 (B3, partial):** The authenticated helper now has a supervised llama.cpp runtime and command. Still required: a pinned and packaged runner/model, real token/template parity, chunk-boundary whole-text accounting, and the full `make test-tokenizer-parity` gate.
-- **BN6 (B4, partial):** Add deterministic SOCKS5h remote-DNS and no-direct-fallback tests. Still required: credential-store, reconnect, revoked/stale auth, and supported-OS transport evidence.
+- **BN6 (B4, partial):** Add deterministic SOCKS5h remote-DNS, credential-handshake, and no-direct-fallback tests. Still required: OS credential-store integration, reconnect, revoked/stale auth, and supported-OS transport evidence.
 
 ## Changelog
 
@@ -242,6 +242,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - v3, 2026-10-10: Add the C9 HTTP handler, authentication, bounded queue and strict error mapping; the runnable pinned runtime and parity evidence remain open.
 - v4, 2026-10-11: Add the supervised llama.cpp runtime and `cmd/tokenizer`; verify catalog artifact bytes, runner commit, loaded path and template hash. No model artifact or helper/node parity proof is present, so B3 remains open.
 - v5, 2026-10-11: Add focused node SOCKS5h tests and a `make test-node-transport` target; B4's reconnect, credential-store and cross-platform gates remain open.
+- v6, 2026-10-11: Cover the SOCKS5 username/password handshake with synthetic credentials; the OS credential-store and end-to-end transport gates remain open.
 
 ## Open risks
 

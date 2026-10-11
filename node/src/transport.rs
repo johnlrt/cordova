@@ -1597,6 +1597,104 @@ mod socks5h_tests {
     }
 
     #[tokio::test]
+    async fn socks5h_authenticates_with_provided_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local SOCKS test proxy");
+        let proxy_address = listener.local_addr().expect("proxy address");
+        let proxy = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept SOCKS client");
+            let mut hello = [0u8; 4];
+            stream
+                .read_exact(&mut hello)
+                .await
+                .expect("read SOCKS greeting");
+            assert_eq!(hello, [5, 2, 0, 2]);
+            stream
+                .write_all(&[5, 2])
+                .await
+                .expect("select username/password mode");
+
+            let mut auth_header = [0u8; 2];
+            stream
+                .read_exact(&mut auth_header)
+                .await
+                .expect("read authentication header");
+            assert_eq!(auth_header[0], 1);
+            let mut username = vec![0u8; usize::from(auth_header[1])];
+            stream
+                .read_exact(&mut username)
+                .await
+                .expect("read proxy username");
+            let mut password_length = [0u8; 1];
+            stream
+                .read_exact(&mut password_length)
+                .await
+                .expect("read proxy password length");
+            let mut password = vec![0u8; usize::from(password_length[0])];
+            stream
+                .read_exact(&mut password)
+                .await
+                .expect("read proxy password");
+            assert_eq!(username.as_slice(), b"proxy-user");
+            assert_eq!(password.as_slice(), b"proxy-secret");
+            stream
+                .write_all(&[1, 0])
+                .await
+                .expect("accept proxy credentials");
+
+            let mut connect_header = [0u8; 4];
+            stream
+                .read_exact(&mut connect_header)
+                .await
+                .expect("read SOCKS connect header");
+            assert_eq!(connect_header, [5, 1, 0, 3]);
+            let mut name_length = [0u8; 1];
+            stream
+                .read_exact(&mut name_length)
+                .await
+                .expect("read target name length");
+            let mut name = vec![0u8; usize::from(name_length[0])];
+            stream
+                .read_exact(&mut name)
+                .await
+                .expect("read target hostname");
+            let mut port = [0u8; 2];
+            stream
+                .read_exact(&mut port)
+                .await
+                .expect("read target port");
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 1])
+                .await
+                .expect("return successful SOCKS tunnel");
+            (
+                String::from_utf8(name).expect("valid target hostname"),
+                u16::from_be_bytes(port),
+            )
+        });
+
+        let stream = TcpStream::connect(proxy_address)
+            .await
+            .expect("connect to local SOCKS test proxy");
+        let tunnel = socks5_connect(
+            stream,
+            "node.invalid",
+            443,
+            Some("proxy-user"),
+            Some("proxy-secret"),
+        )
+        .await
+        .expect("SOCKS5h authentication and tunnel should succeed");
+        drop(tunnel);
+
+        assert_eq!(
+            proxy.await.expect("proxy task"),
+            ("node.invalid".to_owned(), 443)
+        );
+    }
+
+    #[tokio::test]
     async fn unavailable_socks5h_proxy_does_not_fall_back_to_direct_connection() {
         let direct_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
