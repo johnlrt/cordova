@@ -597,6 +597,16 @@ func (s *nodeService) detachPeer(peer *nodePeer) {
 	s.peerMu.Unlock()
 }
 
+func (s *nodeService) peerSnapshot(nodeID string) (*nodePeer, bool) {
+	if s == nil || !validID(nodeID) {
+		return nil, false
+	}
+	s.peerMu.RLock()
+	peer := s.peers[nodeID]
+	s.peerMu.RUnlock()
+	return peer, peer != nil
+}
+
 func (s *nodeService) beginNodeExchange(ctx context.Context, nodeID, typ string, payload any) (*nodeExchange, error) {
 	s.peerMu.RLock()
 	peer := s.peers[nodeID]

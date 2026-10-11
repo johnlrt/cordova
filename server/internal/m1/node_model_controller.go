@@ -54,25 +54,48 @@ func (c *nodeModelController) Query(ctx context.Context, nodeID, modelID, catalo
 	if state.ArtifactSHA256 != nil {
 		status.ArtifactSHA256 = *state.ArtifactSHA256
 	}
+	if err := c.nodes.recordNodeModelState(ctx, exchange.peer.identity, exchange.peer.sessionID, state, time.Now().UTC()); err != nil {
+		return inference.RemoteModelStatus{}, err
+	}
 	return status, nil
 }
 
 func (c *nodeModelController) Load(ctx context.Context, nodeID, modelID, catalogVersion string) (string, error) {
-	return c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.load")
+	ready, err := c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.load")
+	return ready.ArtifactSHA256, err
 }
 
 func (c *nodeModelController) Download(ctx context.Context, nodeID, modelID, catalogVersion string) (string, error) {
+	ready, err := c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.download")
+	return ready.ArtifactSHA256, err
+}
+
+type nodeModelReady struct {
+	ModelID               string
+	CommandID             string
+	ArtifactSHA256        string
+	TokenizerSHA256       string
+	TemplateSHA256        string
+	MaxSlots              uint32
+	VerifiedCapacityBytes uint64
+}
+
+func (c *nodeModelController) loadVerified(ctx context.Context, nodeID, modelID, catalogVersion string) (nodeModelReady, error) {
+	return c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.load")
+}
+
+func (c *nodeModelController) downloadVerified(ctx context.Context, nodeID, modelID, catalogVersion string) (nodeModelReady, error) {
 	return c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.download")
 }
 
-func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, modelID, catalogVersion, operation string) (string, error) {
+func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, modelID, catalogVersion, operation string) (nodeModelReady, error) {
 	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) ||
 		(operation != "model.load" && operation != "model.download") {
-		return "", errors.New("invalid model command")
+		return nodeModelReady{}, errors.New("invalid model command")
 	}
 	commandID, err := domain.NewID()
 	if err != nil {
-		return "", err
+		return nodeModelReady{}, err
 	}
 	operationTimeout := 10 * time.Minute
 	if operation == "model.load" {
@@ -82,25 +105,25 @@ func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, model
 	defer cancel()
 	deadline, ok := operationCtx.Deadline()
 	if !ok {
-		return "", errors.New("model command deadline is unavailable")
+		return nodeModelReady{}, errors.New("model command deadline is unavailable")
 	}
 	deadline = deadline.UTC()
 	if !deadline.After(time.Now()) {
-		return "", context.DeadlineExceeded
+		return nodeModelReady{}, context.DeadlineExceeded
 	}
 	exchange, err := c.nodes.beginNodeExchange(operationCtx, nodeID, operation, map[string]any{
 		"model_id": modelID, "catalog_version": catalogVersion, "command_id": commandID.String(),
 		"deadline_at": deadline.Format(time.RFC3339Nano),
 	})
 	if err != nil {
-		return "", err
+		return nodeModelReady{}, err
 	}
 	defer exchange.Close()
 	accepted := false
 	for {
 		frame, err := exchange.Next(operationCtx)
 		if err != nil {
-			return "", err
+			return nodeModelReady{}, err
 		}
 		switch frame.Type {
 		case "model.accepted":
@@ -112,12 +135,12 @@ func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, model
 			if accepted || decodeNodePayload(frame.Payload, &response, "model_id", "command_id", "operation") != nil ||
 				response.ModelID != modelID || response.CommandID != commandID.String() ||
 				response.Operation != operation[len("model."):] {
-				return "", errors.New("node returned invalid model acceptance")
+				return nodeModelReady{}, errors.New("node returned invalid model acceptance")
 			}
 			accepted = true
 		case "model.progress":
 			if !accepted {
-				return "", errors.New("node reported model progress before acceptance")
+				return nodeModelReady{}, errors.New("node reported model progress before acceptance")
 			}
 		case "model.ready":
 			var response struct {
@@ -134,13 +157,16 @@ func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, model
 				response.ModelID != modelID || response.CommandID != commandID.String() || !validNodeHash(response.ArtifactSHA256) ||
 				!validNodeHash(response.TokenizerSHA256) || !validNodeHash(response.TemplateSHA256) ||
 				response.MaxSlots == 0 || response.MaxSlots > 64 {
-				return "", errors.New("node returned invalid model readiness")
+				return nodeModelReady{}, errors.New("node returned invalid model readiness")
 			}
-			return response.ArtifactSHA256, nil
+			return nodeModelReady{ModelID: response.ModelID, CommandID: response.CommandID,
+				ArtifactSHA256: response.ArtifactSHA256, TokenizerSHA256: response.TokenizerSHA256,
+				TemplateSHA256: response.TemplateSHA256, MaxSlots: response.MaxSlots,
+				VerifiedCapacityBytes: response.VerifiedCapacityBytes}, nil
 		case "model.reject", "error":
-			return "", ErrNodeModelCommandRejected
+			return nodeModelReady{}, ErrNodeModelCommandRejected
 		default:
-			return "", errors.New("node returned an unexpected model response")
+			return nodeModelReady{}, errors.New("node returned an unexpected model response")
 		}
 	}
 }

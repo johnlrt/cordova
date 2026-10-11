@@ -35,6 +35,8 @@ type nodeCapacityProfile struct {
 	BenchmarkPassed       bool   `json:"benchmark_passed"`
 	VerifiedSlots         uint32 `json:"verified_slots"`
 	VerifiedCapacityBytes uint64 `json:"verified_capacity_bytes"`
+	Rank                  int    `json:"rank"`
+	FirstTokenLatencyMS   uint64 `json:"first_token_latency_ms"`
 }
 
 type nodeLeaseRecord struct {
@@ -159,7 +161,8 @@ func (s *nodeService) setVerifiedNodeCapacity(ctx context.Context, profile nodeC
 	if ctx == nil || !validID(profile.NodeID) || !validModelSlug(profile.ModelID) || !validID(profile.CatalogVersion) ||
 		!validNodeHash(profile.ArtifactSHA256) || !validID(profile.BenchmarkID) || !profile.BenchmarkPassed ||
 		profile.VerifiedSlots == 0 || profile.VerifiedSlots > 64 || profile.VerifiedCapacityBytes == 0 ||
-		profile.VerifiedCapacityBytes > (1<<53)-1 {
+		profile.VerifiedCapacityBytes > (1<<53)-1 || profile.Rank < 0 || profile.Rank > 100 || profile.FirstTokenLatencyMS == 0 ||
+		profile.FirstTokenLatencyMS > 120_000 {
 		return ErrInvalid
 	}
 	now := time.Now().Unix()
@@ -246,6 +249,35 @@ func (s *nodeService) hasActiveNodeLeases(ctx context.Context, nodeID, sessionID
 	}, nodeID, sessionID, strconv.FormatUint(generation, 10)).Int()
 	return result == 1, err
 }
+
+func (s *nodeService) activeNodeModelLeaseCount(ctx context.Context, nodeID, sessionID string, generation uint64, modelID string) (int64, error) {
+	if ctx == nil || !validID(nodeID) || !validID(sessionID) || generation == 0 || !validModelSlug(modelID) {
+		return 0, ErrInvalid
+	}
+	return s.redis.Eval(ctx, activeNodeModelLeaseCountScript, []string{
+		nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID),
+	}, nodeID, sessionID, strconv.FormatUint(generation, 10), modelID).Int64()
+}
+
+const activeNodeModelLeaseCountScript = `
+local leases_type=redis.call('TYPE',KEYS[1]).ok
+local details_type=redis.call('TYPE',KEYS[2]).ok
+if (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node lease key type mismatch') end
+local clock=redis.call('TIME')
+local now_ms=tonumber(clock[1])*1000+math.floor(tonumber(clock[2])/1000)
+local members=redis.call('ZRANGEBYSCORE',KEYS[1],now_ms+1,'+inf','WITHSCORES')
+if #members>65536 then return redis.error_reply('node lease index exceeds safe bounds') end
+local active=0
+for i=1,#members,2 do
+  local lease_id=members[i]
+  local raw=redis.call('HGET',KEYS[2],lease_id)
+  if not raw then return redis.error_reply('node lease index has no record') end
+  local ok,record=pcall(cjson.decode,raw)
+  if not ok or type(record)~='table' or record['lease_id']~=lease_id then return redis.error_reply('node lease record is invalid') end
+  if record['node_id']==ARGV[1] and record['session_id']==ARGV[2] and record['generation']==ARGV[3] and
+     record['model_id']==ARGV[4] and tonumber(record['released_at_ms'] or '0')==0 then active=active+1 end
+end
+return active`
 
 const claimNodeSlotScript = `
 local session_type=redis.call('TYPE',KEYS[1]).ok

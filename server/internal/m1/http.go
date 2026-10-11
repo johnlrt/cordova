@@ -87,12 +87,16 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 	if len(readiness) > 0 {
 		h.ready = readiness[0]
 	}
+	mode := cfg.InferenceMode
+	if mode == "" {
+		mode = "mock"
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "stage": "m1", "mode": "mock"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "stage": "m1", "mode": mode})
 	})
 	mux.Handle("/v1/", chat)
 	mux.HandleFunc("/api/auth/register", h.register)
@@ -137,7 +141,7 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 			writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Storage is unavailable.")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready", "mode": "mock"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready", "mode": mode})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Unknown endpoint.")

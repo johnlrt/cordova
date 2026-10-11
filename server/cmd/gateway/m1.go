@@ -28,6 +28,13 @@ import (
 )
 
 func runM1(address string) error {
+	inferenceMode := strings.ToLower(strings.TrimSpace(os.Getenv("CORDOVA_INFERENCE_MODE")))
+	if inferenceMode == "" {
+		inferenceMode = "mock"
+	}
+	if inferenceMode != "mock" && inferenceMode != "c3" {
+		return errors.New("CORDOVA_INFERENCE_MODE must be mock or c3")
+	}
 	origin := strings.TrimSpace(os.Getenv("CORDOVA_PUBLIC_ORIGIN"))
 	if !validPublicOrigin(origin) {
 		return errors.New("CORDOVA_PUBLIC_ORIGIN must be an absolute HTTP(S) origin without a path")
@@ -61,6 +68,9 @@ func runM1(address string) error {
 	if err != nil {
 		return err
 	}
+	if inferenceMode == "c3" && !trustedTokenizerEnabled {
+		return errors.New("C3 inference requires the trusted tokenizer and a signed model catalog")
+	}
 	redisURL := strings.TrimSpace(os.Getenv("CORDOVA_REDIS_URL"))
 	if redisURL == "" {
 		return errors.New("CORDOVA_REDIS_URL is required in M1 mode")
@@ -84,6 +94,7 @@ func runM1(address string) error {
 	config := m1.Config{Origin: origin, PrivacyNoticeVersion: notice, Pepper: pepper,
 		NodeSecretEncryptionKey: nodeEncryptionKey, NodeJWTSigningKey: nodeSigningKey,
 		NodeCatalogSnapshot: catalogSnapshot, NodeCatalogPublicKey: catalogPublicKey,
+		InferenceMode: inferenceMode,
 		SecureCookies: true, TrustProxy: strings.EqualFold(os.Getenv("CORDOVA_TRUST_PROXY"), "true")}
 	store, err := m1.NewStore(rdb, config)
 	if err != nil {
@@ -103,33 +114,50 @@ func runM1(address string) error {
 		return err
 	}
 	defer events.Close()
-	endpoint := strings.TrimSpace(os.Getenv("CORDOVA_MOCK_NODE_URL"))
-	if endpoint == "" {
-		return errors.New("CORDOVA_MOCK_NODE_URL is required in M1 mode")
+	var provider *mocknode.Provider
+	var router request.Router
+	var routerErr error
+	switch inferenceMode {
+	case "mock":
+		endpoint := strings.TrimSpace(os.Getenv("CORDOVA_MOCK_NODE_URL"))
+		if endpoint == "" {
+			return errors.New("CORDOVA_MOCK_NODE_URL is required in mock inference mode")
+		}
+		token, err := secretBytes("CORDOVA_MOCK_NODE_TOKEN", "CORDOVA_MOCK_NODE_TOKEN_FILE")
+		if err != nil {
+			return err
+		}
+		caPath := strings.TrimSpace(os.Getenv("CORDOVA_MOCK_NODE_CA_FILE"))
+		if caPath == "" {
+			return errors.New("CORDOVA_MOCK_NODE_CA_FILE is required in mock inference mode")
+		}
+		caData, err := os.ReadFile(caPath)
+		if err != nil {
+			return errors.New("mock node CA could not be read")
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(caData) {
+			return errors.New("mock node CA is invalid")
+		}
+		provider, routerErr = mocknode.NewProvider(endpoint, string(token), roots)
+		if routerErr != nil {
+			return routerErr
+		}
+		router, routerErr = mocknode.NewRequestRouter(provider, "00000000-0000-4000-8000-000000000002", 4)
+	case "c3":
+		if len(nodeEncryptionKey) != 32 || len(nodeSigningKey) != ed25519.PrivateKeySize {
+			return errors.New("C3 inference requires the node API encryption and signing keys")
+		}
+		router, routerErr = m1.NewC3RequestRouter(store)
 	}
-	token, err := secretBytes("CORDOVA_MOCK_NODE_TOKEN", "CORDOVA_MOCK_NODE_TOKEN_FILE")
-	if err != nil {
-		return err
+	if routerErr != nil {
+		return routerErr
 	}
-	caPath := strings.TrimSpace(os.Getenv("CORDOVA_MOCK_NODE_CA_FILE"))
-	if caPath == "" {
-		return errors.New("CORDOVA_MOCK_NODE_CA_FILE is required in M1 mode")
-	}
-	caData, err := os.ReadFile(caPath)
-	if err != nil {
-		return errors.New("mock node CA could not be read")
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caData) {
-		return errors.New("mock node CA is invalid")
-	}
-	provider, err := mocknode.NewProvider(endpoint, string(token), roots)
-	if err != nil {
-		return err
-	}
-	router, err := mocknode.NewRequestRouter(provider, "00000000-0000-4000-8000-000000000002", 4)
-	if err != nil {
-		return err
+	pingInference := func(ctx context.Context) error {
+		if provider == nil {
+			return nil
+		}
+		return provider.Ping(ctx)
 	}
 	priceVersion, err := domain.ParseID("00000000-0000-4000-8000-000000000001")
 	if err != nil {
@@ -153,7 +181,7 @@ func runM1(address string) error {
 	for {
 		redisErr := rdb.Ping(startupCtx).Err()
 		kafkaErr := events.Ping(startupCtx)
-		nodeErr := provider.Ping(startupCtx)
+		nodeErr := pingInference(startupCtx)
 		tokenizerErr := checkTokenizerReady(startupCtx, inputTokenizer)
 		if redisErr == nil && kafkaErr == nil && nodeErr == nil && tokenizerErr == nil {
 			break
@@ -185,7 +213,7 @@ func runM1(address string) error {
 		if !ledger.Ready() {
 			return errors.New("financial ledger recovery is incomplete")
 		}
-		return provider.Ping(ctx)
+		return pingInference(ctx)
 	})
 	if err != nil {
 		return err
@@ -200,9 +228,9 @@ func runM1(address string) error {
 	serverResult := make(chan error, 1)
 	go func() { serverResult <- server.ListenAndServe() }()
 	if trustedTokenizerEnabled {
-		fmt.Printf("Cordova M1 mock slice listening on %s; trusted tokenizer enabled; test credits only\n", address)
+		fmt.Printf("Cordova M1 %s inference listening on %s; trusted tokenizer enabled; test credits only\n", inferenceMode, address)
 	} else {
-		fmt.Printf("Cordova M1 mock slice listening on %s; synthetic usage only; test credits only\n", address)
+		fmt.Printf("Cordova M1 %s inference listening on %s; synthetic usage only; test credits only\n", inferenceMode, address)
 	}
 	select {
 	case err := <-serverResult:

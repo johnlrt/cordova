@@ -36,7 +36,11 @@ func run() error {
 	flag.Parse()
 	if *version {
 		if m1Mode() {
-			fmt.Println("Cordova M1 mock slice / test credits only / no real model or billing")
+			mode := strings.ToLower(strings.TrimSpace(os.Getenv("CORDOVA_INFERENCE_MODE")))
+			if mode == "" {
+				mode = "mock"
+			}
+			fmt.Printf("Cordova M1 %s inference / test credits only / no real billing\n", mode)
 		} else {
 			fmt.Println("Cordova Stage 1 mock API / synthetic word counts / no real model or billing")
 		}

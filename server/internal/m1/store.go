@@ -48,6 +48,7 @@ var (
 )
 
 type Config struct {
+	InferenceMode          string
 	Origin                  string
 	PrivacyNoticeVersion    string
 	Pepper                  []byte
