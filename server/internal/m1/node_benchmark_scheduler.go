@@ -17,12 +17,12 @@ import (
 )
 
 const (
-	maxActiveNodeBenchmarks        = 1
-	maxConcurrentBenchmarkCounts   = 2
-	maxBenchmarkOutputBytes        = 64 << 10
-	maxBenchmarkTotalBytes         = 4 << 20
-	nodeBenchmarkTimeout           = 120 * time.Second
-	benchmarkJobTimeout            = 15 * time.Minute
+	maxActiveNodeBenchmarks      = 1
+	maxConcurrentBenchmarkCounts = 2
+	maxBenchmarkOutputBytes      = 64 << 10
+	maxBenchmarkTotalBytes       = 4 << 20
+	nodeBenchmarkTimeout         = 120 * time.Second
+	benchmarkJobTimeout          = 15 * time.Minute
 )
 
 type c3BenchmarkTokenizer interface {
@@ -49,8 +49,8 @@ type nodeBenchmarkObservation struct {
 }
 
 type nodeBenchmarkTrial struct {
-	benchmarkID string
-	firstToken  uint64
+	benchmarkID          string
+	firstToken           uint64
 	tokensPerSecondMilli uint64
 }
 
@@ -111,6 +111,21 @@ func (s *nodeBenchmarkScheduler) close() {
 	s.cancel()
 	s.mu.Unlock()
 	s.workers.Wait()
+}
+
+func (s *nodeBenchmarkScheduler) activeForModel(modelID string) bool {
+	if s == nil || !validModelSlug(modelID) {
+		return false
+	}
+	suffix := ":" + modelID
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.jobs {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *nodeBenchmarkScheduler) calibrate(ctx context.Context, nodeID string, manifest NodeCatalogManifest, hardware nodeHardware) error {
@@ -188,7 +203,7 @@ func (s *nodeBenchmarkScheduler) calibrate(ctx context.Context, nodeID string, m
 			BenchmarkID: trial.benchmarkID, BenchmarkedAtUnix: now.Unix(),
 			ExpiresAtUnix: now.Add(nodeCapacityProfileMaxAge).Unix(), BenchmarkPassed: true,
 			VerifiedSlots: concurrency, VerifiedCapacityBytes: footprint, Rank: 10,
-			FirstTokenLatencyMS: trial.firstToken,
+			FirstTokenLatencyMS:          trial.firstToken,
 			VerifiedTokensPerSecondMilli: trial.tokensPerSecondMilli}
 	}
 	if best == nil {

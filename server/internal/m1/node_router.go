@@ -14,15 +14,16 @@ import (
 )
 
 const (
-	maxC3RoutingCandidates     = 100
-	maxConcurrentModelQueries  = 8
-	nodeModelQueryTimeout      = 2 * time.Second
+	maxC3RoutingCandidates    = 100
+	maxConcurrentModelQueries = 8
+	nodeModelQueryTimeout     = 2 * time.Second
 )
 
 type c3RequestRouter struct {
 	nodes      *nodeService
 	controller *nodeModelController
 	benchmarks *nodeBenchmarkScheduler
+	modelLoads *nodeModelLoadScheduler
 	catalog    NodeCatalogSnapshot
 	models     map[string]NodeCatalogManifest
 }
@@ -66,6 +67,7 @@ func NewC3RequestRouter(store *Store, tokenizers ...request.Tokenizer) (request.
 	}
 	if len(tokenizers) == 1 {
 		router.benchmarks = newNodeBenchmarkScheduler(nodes, controller, catalog, router.models, tokenizers[0])
+		router.modelLoads = newNodeModelLoadScheduler(nodes, controller, catalog, router.models, router.benchmarks)
 	}
 	return router, nil
 }
@@ -73,6 +75,9 @@ func NewC3RequestRouter(store *Store, tokenizers ...request.Tokenizer) (request.
 var _ request.Router = (*c3RequestRouter)(nil)
 
 func (r *c3RequestRouter) Close() error {
+	if r != nil && r.modelLoads != nil {
+		r.modelLoads.close()
+	}
 	if r != nil && r.benchmarks != nil {
 		r.benchmarks.close()
 	}
@@ -100,7 +105,7 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 		return nil, err
 	}
 	if len(profiles) == 0 {
-		warming, err := r.scheduleLoadedModelBenchmarks(ctx, manifest, excluded, now)
+		warming, err := r.scheduleModelPreparation(ctx, manifest, excluded, now)
 		if err != nil {
 			return nil, err
 		}
@@ -152,10 +157,17 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 			}
 			if !errors.Is(err, ErrNodeNoCapacity) && !errors.Is(err, ErrNodeSlotUnavailable) &&
 				!errors.Is(err, ErrNodeSessionUnavailable) && !errors.Is(err, ErrNodeConflict) &&
-				!errors.Is(err, ErrNodeBenchmarkActive) {
+				!errors.Is(err, ErrNodeBenchmarkActive) && !errors.Is(err, ErrNodePreparationActive) {
 				return nil, err
 			}
 		}
+	}
+	warming, err := r.scheduleModelPreparation(ctx, manifest, excluded, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if warming {
+		return nil, request.ErrModelWarming
 	}
 	return nil, request.ErrNoCapacity
 }
@@ -233,14 +245,31 @@ func (r *c3RequestRouter) freshLivePeers(ctx context.Context, excluded map[strin
 	return result, nil
 }
 
-func (r *c3RequestRouter) scheduleLoadedModelBenchmarks(ctx context.Context, manifest NodeCatalogManifest,
+func (r *c3RequestRouter) scheduleModelPreparation(ctx context.Context, manifest NodeCatalogManifest,
 	excluded map[string]struct{}, now time.Time) (bool, error) {
-	if r.benchmarks == nil {
+	if r.benchmarks == nil && r.modelLoads == nil {
 		return false, nil
 	}
 	peers, err := r.freshLivePeers(ctx, excluded, now)
 	if err != nil || len(peers) == 0 {
 		return false, err
+	}
+	if requiredCapacity, ok := oneSlotCapacity(manifest); ok {
+		profiles, profileErr := r.freshProfiles(ctx, manifest, requiredCapacity, excluded, now)
+		if profileErr != nil {
+			return false, profileErr
+		}
+		byNode := make(map[string]nodeCapacityProfile, len(profiles))
+		for _, profile := range profiles {
+			byNode[profile.nodeID] = profile.profile
+		}
+		for index := range peers {
+			if profile, exists := byNode[peers[index].nodeID]; exists {
+				peers[index].profile = profile
+				peers[index].rank = profile.Rank
+			}
+		}
+		rankC3Candidates(peers)
 	}
 	states, err := r.queryModelStates(ctx, manifest, peers)
 	if err != nil {
@@ -249,12 +278,22 @@ func (r *c3RequestRouter) scheduleLoadedModelBenchmarks(ctx context.Context, man
 	scheduled := false
 	for _, peer := range peers {
 		state, ok := states[peer.nodeID]
-		if !ok || state.State != "loaded" || state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
+		if !ok || state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
 			continue
 		}
-		if r.benchmarks.schedule(peer.nodeID, manifest.Model.ID, peer.hardware) {
-			scheduled = true
+		switch state.State {
+		case "loaded":
+			if r.benchmarks != nil && r.benchmarks.schedule(peer.nodeID, manifest.Model.ID, peer.hardware) {
+				scheduled = true
+			}
+		case "on_disk":
+			if r.modelLoads != nil && r.modelLoads.schedule(peer, manifest.Model.ID) {
+				scheduled = true
+			}
 		}
+	}
+	if !scheduled {
+		scheduled = r.benchmarks.activeForModel(manifest.Model.ID) || r.modelLoads.activeForModel(manifest.Model.ID)
 	}
 	return scheduled, nil
 }
@@ -329,9 +368,9 @@ func (r *c3RequestRouter) freshModelState(ctx context.Context, nodeID, modelID s
 		return nodeModelStatePayload{}, false, err
 	}
 	var record struct {
-		SessionID string               `json:"session_id"`
-		NodeID    string               `json:"node_id"`
-		Received  string               `json:"received_at"`
+		SessionID string                `json:"session_id"`
+		NodeID    string                `json:"node_id"`
+		Received  string                `json:"received_at"`
 		Model     nodeModelStatePayload `json:"model"`
 	}
 	if decodeStrictBytes(data, &record) != nil || record.NodeID != nodeID || !validID(record.SessionID) || record.Model.ModelID != modelID {

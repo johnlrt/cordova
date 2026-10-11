@@ -20,24 +20,25 @@ const (
 )
 
 var (
-	ErrNodeSlotUnavailable = errors.New("node has no verified available slot")
-	ErrNodeNoCapacity      = errors.New("node has no free verified capacity")
-	ErrNodeBenchmarkActive = errors.New("node model is being benchmarked")
+	ErrNodeSlotUnavailable   = errors.New("node has no verified available slot")
+	ErrNodeNoCapacity        = errors.New("node has no free verified capacity")
+	ErrNodeBenchmarkActive   = errors.New("node model is being benchmarked")
+	ErrNodePreparationActive = errors.New("node model is being prepared")
 )
 
 type nodeCapacityProfile struct {
-	NodeID                string `json:"node_id"`
-	ModelID               string `json:"model_id"`
-	CatalogVersion        string `json:"catalog_version"`
-	ArtifactSHA256        string `json:"artifact_sha256"`
-	BenchmarkID           string `json:"benchmark_id"`
-	BenchmarkedAtUnix     int64  `json:"benchmarked_at_unix"`
-	ExpiresAtUnix         int64  `json:"expires_at_unix"`
-	BenchmarkPassed       bool   `json:"benchmark_passed"`
-	VerifiedSlots         uint32 `json:"verified_slots"`
-	VerifiedCapacityBytes uint64 `json:"verified_capacity_bytes"`
-	Rank                  int    `json:"rank"`
-	FirstTokenLatencyMS   uint64 `json:"first_token_latency_ms"`
+	NodeID                       string `json:"node_id"`
+	ModelID                      string `json:"model_id"`
+	CatalogVersion               string `json:"catalog_version"`
+	ArtifactSHA256               string `json:"artifact_sha256"`
+	BenchmarkID                  string `json:"benchmark_id"`
+	BenchmarkedAtUnix            int64  `json:"benchmarked_at_unix"`
+	ExpiresAtUnix                int64  `json:"expires_at_unix"`
+	BenchmarkPassed              bool   `json:"benchmark_passed"`
+	VerifiedSlots                uint32 `json:"verified_slots"`
+	VerifiedCapacityBytes        uint64 `json:"verified_capacity_bytes"`
+	Rank                         int    `json:"rank"`
+	FirstTokenLatencyMS          uint64 `json:"first_token_latency_ms"`
 	VerifiedTokensPerSecondMilli uint64 `json:"verified_tokens_per_second_milli"`
 }
 
@@ -54,16 +55,16 @@ type nodeLeaseRecord struct {
 }
 
 type nodeSlotLease struct {
-	nodes        *nodeService
-	nodeID       string
-	modelID      string
-	sessionID    string
-	generation   uint64
-	attemptID    string
-	leaseID      string
+	nodes      *nodeService
+	nodeID     string
+	modelID    string
+	sessionID  string
+	generation uint64
+	attemptID  string
+	leaseID    string
 }
 
-func nodeLeaseIndexKey(nodeID string) string { return "cv:v1:node-leases:" + nodeID }
+func nodeLeaseIndexKey(nodeID string) string   { return "cv:v1:node-leases:" + nodeID }
 func nodeLeaseDetailsKey(nodeID string) string { return "cv:v1:node-lease-details:" + nodeID }
 func nodeCapacityProfileKey(nodeID, modelID string) string {
 	return "cv:v1:node-capacity:" + nodeID + ":" + modelID
@@ -100,6 +101,7 @@ func (s *nodeService) claimNodeSlot(ctx context.Context, nodeID, modelID, catalo
 			nodeSessionKey(nodeID), nodeRecordKey(nodeID), nodeHeartbeatKey(nodeID),
 			nodeModelStateKey(nodeID, modelID), nodeCapacityProfileKey(nodeID, modelID),
 			nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+			nodeModelLoadLockKey(nodeID, sessionID, modelID),
 		}, sessionID, record.Generation, nodeID, identity.OwnerID, identity.SecretVersion,
 			modelID, catalogVersion, artifactSHA256, strconv.FormatUint(requiredCapacityBytes, 10), attemptID, leaseID,
 			record.ExpiresAtMS, string(encoded)).Int()
@@ -116,6 +118,8 @@ func (s *nodeService) claimNodeSlot(ctx context.Context, nodeID, modelID, catalo
 			return nil, ErrNodeNoCapacity
 		case -3:
 			return nil, ErrNodeBenchmarkActive
+		case -4:
+			return nil, ErrNodePreparationActive
 		default:
 			return nil, ErrNodeSlotUnavailable
 		}
@@ -124,8 +128,65 @@ func (s *nodeService) claimNodeSlot(ctx context.Context, nodeID, modelID, catalo
 	return nil, ErrNodeSessionUnavailable
 }
 
-func nodeBenchmarkLockKey(nodeID, sessionID, modelID string) string {
-	return "cv:v1:node-benchmark-lock:" + nodeID + ":" + sessionID + ":" + modelID
+func nodeBenchmarkLockKey(nodeID, sessionID, _ string) string {
+	return "cv:v1:node-benchmark-lock:" + nodeID + ":" + sessionID
+}
+
+func nodeModelLoadLockKey(nodeID, sessionID, _ string) string {
+	return "cv:v1:node-model-load-lock:" + nodeID + ":" + sessionID
+}
+
+func (s *nodeService) acquireNodeModelLoadLock(ctx context.Context, nodeID, modelID, catalogVersion,
+	artifactSHA256, lockID string) (string, uint64, error) {
+	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) ||
+		!validNodeHash(artifactSHA256) || !validID(lockID) {
+		return "", 0, ErrInvalid
+	}
+	s.peerMu.RLock()
+	peer := s.peers[nodeID]
+	if peer == nil {
+		s.peerMu.RUnlock()
+		return "", 0, ErrNodeSessionUnavailable
+	}
+	identity, sessionID := peer.identity, peer.sessionID
+	s.peerMu.RUnlock()
+	if identity.Generation == 0 || identity.SessionID != sessionID {
+		return "", 0, ErrNodeSessionUnavailable
+	}
+	result, err := s.redis.Eval(ctx, acquireNodeModelLoadLockScript, []string{
+		nodeSessionKey(nodeID), nodeRecordKey(nodeID), nodeHeartbeatKey(nodeID), nodeModelStateKey(nodeID, modelID),
+		nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeModelLoadLockKey(nodeID, sessionID, modelID),
+		nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+	}, sessionID, strconv.FormatUint(identity.Generation, 10), nodeID, identity.OwnerID,
+		identity.SecretVersion, modelID, catalogVersion, artifactSHA256, lockID, 30_000).Int()
+	if err != nil {
+		return "", 0, err
+	}
+	switch result {
+	case 1:
+		return sessionID, identity.Generation, nil
+	case -1:
+		return "", 0, ErrNodeConflict
+	case -2:
+		return "", 0, ErrNodePreparationActive
+	default:
+		return "", 0, ErrNodeSessionUnavailable
+	}
+}
+
+func (s *nodeService) releaseNodeModelLoadLock(ctx context.Context, nodeID, sessionID, modelID, lockID string) {
+	if ctx == nil || ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), nodeAttemptCleanupTimeout)
+		defer cancel()
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, nodeAttemptCleanupTimeout)
+		defer cancel()
+	}
+	_, _ = s.redis.Eval(ctx, releaseNodeModelLoadLockScript, []string{
+		nodeModelLoadLockKey(nodeID, sessionID, modelID),
+	}, lockID).Int()
 }
 
 func (s *nodeService) acquireNodeBenchmarkLock(ctx context.Context, nodeID, modelID, catalogVersion,
@@ -148,6 +209,7 @@ func (s *nodeService) acquireNodeBenchmarkLock(ctx context.Context, nodeID, mode
 	result, err := s.redis.Eval(ctx, acquireNodeBenchmarkLockScript, []string{
 		nodeSessionKey(nodeID), nodeRecordKey(nodeID), nodeHeartbeatKey(nodeID), nodeModelStateKey(nodeID, modelID),
 		nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+		nodeModelLoadLockKey(nodeID, sessionID, modelID),
 	}, sessionID, strconv.FormatUint(identity.Generation, 10), nodeID, identity.OwnerID,
 		identity.SecretVersion, modelID, catalogVersion, artifactSHA256, lockID, 180_000).Int()
 	if err != nil {
@@ -244,6 +306,7 @@ func (s *nodeService) claimNodeBenchmarkSlots(ctx context.Context, nodeID, model
 	result, err := s.redis.Eval(ctx, claimNodeBenchmarkSlotsScript, []string{
 		nodeSessionKey(nodeID), nodeRecordKey(nodeID), nodeHeartbeatKey(nodeID), nodeModelStateKey(nodeID, modelID),
 		nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+		nodeModelLoadLockKey(nodeID, sessionID, modelID),
 	}, arguments...).Int()
 	if err != nil {
 		return nil, err
@@ -430,6 +493,54 @@ for i=1,#members,2 do
 end
 return active`
 
+const acquireNodeModelLoadLockScript = `
+local session_type=redis.call('TYPE',KEYS[1]).ok
+local node_type=redis.call('TYPE',KEYS[2]).ok
+local heartbeat_type=redis.call('TYPE',KEYS[3]).ok
+local state_type=redis.call('TYPE',KEYS[4]).ok
+local leases_type=redis.call('TYPE',KEYS[5]).ok
+local details_type=redis.call('TYPE',KEYS[6]).ok
+local load_lock_type=redis.call('TYPE',KEYS[7]).ok
+local benchmark_lock_type=redis.call('TYPE',KEYS[8]).ok
+if session_type~='string' or node_type~='string' or heartbeat_type~='string' or state_type~='string' or
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
+   (load_lock_type~='none' and load_lock_type~='string') or (benchmark_lock_type~='none' and benchmark_lock_type~='string') then
+  return redis.error_reply('node model load key type mismatch')
+end
+if redis.call('PTTL',KEYS[3])<=0 or redis.call('PTTL',KEYS[4])<=0 then return 0 end
+if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return -1 end
+local node_ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
+local state_ok,state=pcall(cjson.decode,redis.call('GET',KEYS[4]))
+if not node_ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or
+   node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false or
+   not state_ok or type(state)~='table' or state['node_id']~=ARGV[3] or state['session_id']~=ARGV[1] or
+   type(state['model'])~='table' or state['model']['model_id']~=ARGV[6] or state['model']['state']~='on_disk' or
+   state['model']['artifact_sha256']~=ARGV[8] then return 0 end
+if load_lock_type=='string' or benchmark_lock_type=='string' then return -2 end
+local clock=redis.call('TIME')
+local now_ms=tonumber(clock[1])*1000+math.floor(tonumber(clock[2])/1000)
+local members=redis.call('ZRANGE',KEYS[5],0,-1,'WITHSCORES')
+if #members>32768 then return redis.error_reply('node lease index exceeds safe bounds') end
+local expired={}
+for i=1,#members,2 do
+  local lease_id=members[i]
+  local score=tonumber(members[i+1])
+  if score<=now_ms then
+    table.insert(expired,lease_id)
+  else
+    local raw=redis.call('HGET',KEYS[6],lease_id)
+    if not raw then return redis.error_reply('node lease index has no record') end
+    local record_ok,record=pcall(cjson.decode,raw)
+    if not record_ok or type(record)~='table' or record['lease_id']~=lease_id then return redis.error_reply('node lease record is invalid') end
+    if record['node_id']==ARGV[3] and record['session_id']==ARGV[1] and record['generation']==ARGV[2] then return -2 end
+  end
+end
+local ttl=tonumber(ARGV[10])
+if ttl<1000 or ttl>30000 then return 0 end
+for _,lease_id in ipairs(expired) do redis.call('ZREM',KEYS[5],lease_id); redis.call('HDEL',KEYS[6],lease_id) end
+redis.call('SET',KEYS[7],ARGV[9],'PX',ttl)
+return 1`
+
 const acquireNodeBenchmarkLockScript = `
 local session_type=redis.call('TYPE',KEYS[1]).ok
 local node_type=redis.call('TYPE',KEYS[2]).ok
@@ -438,9 +549,10 @@ local state_type=redis.call('TYPE',KEYS[4]).ok
 local leases_type=redis.call('TYPE',KEYS[5]).ok
 local details_type=redis.call('TYPE',KEYS[6]).ok
 local lock_type=redis.call('TYPE',KEYS[7]).ok
+local load_lock_type=redis.call('TYPE',KEYS[8]).ok
 if session_type~='string' or node_type~='string' or heartbeat_type~='string' or state_type~='string' or
    (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
-   (lock_type~='none' and lock_type~='string') then return redis.error_reply('node benchmark key type mismatch') end
+   (lock_type~='none' and lock_type~='string') or (load_lock_type~='none' and load_lock_type~='string') then return redis.error_reply('node benchmark key type mismatch') end
 if redis.call('PTTL',KEYS[3])<=0 or redis.call('PTTL',KEYS[4])<=0 then return 0 end
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return -1 end
 local node_ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
@@ -450,7 +562,7 @@ if not node_ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']
    not state_ok or type(state)~='table' or state['node_id']~=ARGV[3] or state['session_id']~=ARGV[1] or
    type(state['model'])~='table' or state['model']['model_id']~=ARGV[6] or state['model']['state']~='loaded' or
    state['model']['artifact_sha256']~=ARGV[8] then return 0 end
-if lock_type=='string' then return -2 end
+if lock_type=='string' or load_lock_type=='string' then return -2 end
 local clock=redis.call('TIME')
 local now_sec=tonumber(clock[1])
 local now_ms=now_sec*1000+math.floor(tonumber(clock[2])/1000)
@@ -468,7 +580,7 @@ for i=1,#members,2 do
     if not raw then return redis.error_reply('node lease index has no record') end
     local record_ok,record=pcall(cjson.decode,raw)
     if not record_ok or type(record)~='table' or record['lease_id']~=lease_id then return redis.error_reply('node lease record is invalid') end
-    if record['node_id']==ARGV[3] and record['session_id']==ARGV[1] and record['generation']==ARGV[2] and record['model_id']==ARGV[6] then
+    if record['node_id']==ARGV[3] and record['session_id']==ARGV[1] and record['generation']==ARGV[2] then
       active_for_model=active_for_model+1
     end
   end
@@ -502,12 +614,15 @@ local state_type=redis.call('TYPE',KEYS[4]).ok
 local leases_type=redis.call('TYPE',KEYS[5]).ok
 local details_type=redis.call('TYPE',KEYS[6]).ok
 local lock_type=redis.call('TYPE',KEYS[7]).ok
+local load_lock_type=redis.call('TYPE',KEYS[8]).ok
 if session_type~='string' or node_type~='string' or heartbeat_type~='string' or state_type~='string' or
-   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or lock_type~='string' then
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or lock_type~='string' or
+   (load_lock_type~='none' and load_lock_type~='string') then
   return redis.error_reply('node benchmark key type mismatch')
 end
 if redis.call('PTTL',KEYS[3])<=0 or redis.call('PTTL',KEYS[4])<=0 or redis.call('PTTL',KEYS[7])<=0 then return 0 end
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] or redis.call('GET',KEYS[7])~=ARGV[10] then return -1 end
+if load_lock_type=='string' then return -1 end
 local node_ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
 local state_ok,state=pcall(cjson.decode,redis.call('GET',KEYS[4]))
 if not node_ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or
@@ -572,10 +687,12 @@ local profile_type=redis.call('TYPE',KEYS[5]).ok
 local leases_type=redis.call('TYPE',KEYS[6]).ok
 local details_type=redis.call('TYPE',KEYS[7]).ok
 local benchmark_lock_type=redis.call('TYPE',KEYS[8]).ok
+local load_lock_type=redis.call('TYPE',KEYS[9]).ok
 if session_type~='string' or node_type~='string' or heartbeat_type~='string' or state_type~='string' or profile_type~='string' or
    (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
-   (benchmark_lock_type~='none' and benchmark_lock_type~='string') then return redis.error_reply('node lease key type mismatch') end
+   (benchmark_lock_type~='none' and benchmark_lock_type~='string') or (load_lock_type~='none' and load_lock_type~='string') then return redis.error_reply('node lease key type mismatch') end
 if benchmark_lock_type=='string' then return -3 end
+if load_lock_type=='string' then return -4 end
 if redis.call('PTTL',KEYS[3])<=0 or redis.call('PTTL',KEYS[4])<=0 then return 0 end
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return -1 end
 local node_ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))

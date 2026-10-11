@@ -25,14 +25,29 @@ func newNodeModelController(nodes *nodeService) (*nodeModelController, error) {
 var _ inference.ModelController = (*nodeModelController)(nil)
 
 func (c *nodeModelController) Query(ctx context.Context, nodeID, modelID, catalogVersion string) (inference.RemoteModelStatus, error) {
+	return c.queryForSession(ctx, nodeID, modelID, catalogVersion, "")
+}
+
+func (c *nodeModelController) queryForSession(ctx context.Context, nodeID, modelID, catalogVersion, expectedSession string) (inference.RemoteModelStatus, error) {
 	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) {
 		return inference.RemoteModelStatus{}, errors.New("invalid model query")
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	exchange, err := c.nodes.beginNodeExchange(operationCtx, nodeID, "model.query", nodeModelRefPayload{
+	payload := nodeModelRefPayload{
 		ModelID: modelID, CatalogVersion: catalogVersion,
-	})
+	}
+	var exchange *nodeExchange
+	var err error
+	if expectedSession == "" {
+		exchange, err = c.nodes.beginNodeExchange(operationCtx, nodeID, "model.query", payload)
+	} else {
+		peer, ok := c.nodes.peerSnapshot(nodeID)
+		if !ok || peer.sessionID != expectedSession || peer.identity.SessionID != expectedSession {
+			return inference.RemoteModelStatus{}, ErrNodeSessionUnavailable
+		}
+		exchange, err = peer.begin(operationCtx, "model.query", payload)
+	}
 	if err != nil {
 		return inference.RemoteModelStatus{}, err
 	}
@@ -84,11 +99,19 @@ func (c *nodeModelController) loadVerified(ctx context.Context, nodeID, modelID,
 	return c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.load")
 }
 
+func (c *nodeModelController) loadVerifiedForSession(ctx context.Context, nodeID, modelID, catalogVersion, sessionID string) (nodeModelReady, error) {
+	return c.runModelCommandForSession(ctx, nodeID, modelID, catalogVersion, "model.load", sessionID)
+}
+
 func (c *nodeModelController) downloadVerified(ctx context.Context, nodeID, modelID, catalogVersion string) (nodeModelReady, error) {
 	return c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.download")
 }
 
 func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, modelID, catalogVersion, operation string) (nodeModelReady, error) {
+	return c.runModelCommandForSession(ctx, nodeID, modelID, catalogVersion, operation, "")
+}
+
+func (c *nodeModelController) runModelCommandForSession(ctx context.Context, nodeID, modelID, catalogVersion, operation, expectedSession string) (nodeModelReady, error) {
 	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) ||
 		(operation != "model.load" && operation != "model.download") {
 		return nodeModelReady{}, errors.New("invalid model command")
@@ -111,10 +134,20 @@ func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, model
 	if !deadline.After(time.Now()) {
 		return nodeModelReady{}, context.DeadlineExceeded
 	}
-	exchange, err := c.nodes.beginNodeExchange(operationCtx, nodeID, operation, map[string]any{
+	payload := map[string]any{
 		"model_id": modelID, "catalog_version": catalogVersion, "command_id": commandID.String(),
 		"deadline_at": deadline.Format(time.RFC3339Nano),
-	})
+	}
+	var exchange *nodeExchange
+	if expectedSession == "" {
+		exchange, err = c.nodes.beginNodeExchange(operationCtx, nodeID, operation, payload)
+	} else {
+		peer, ok := c.nodes.peerSnapshot(nodeID)
+		if !ok || peer.sessionID != expectedSession || peer.identity.SessionID != expectedSession {
+			return nodeModelReady{}, ErrNodeSessionUnavailable
+		}
+		exchange, err = peer.begin(operationCtx, operation, payload)
+	}
 	if err != nil {
 		return nodeModelReady{}, err
 	}
