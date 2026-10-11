@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: contracts-check test-ledger-recovery test-ledger-redis test-ledger-redis-process bootstrap-dev config-check verify-infra-foundations up down smoke network-check test-protocol test-edge
+.PHONY: contracts-check test-ledger-recovery test-ledger-redis test-ledger-redis-process bootstrap-dev config-check verify-infra-foundations up down smoke network-check test-protocol test-edge test-node-transport
 
 contracts-check:
 	sh scripts/contracts-check.sh
@@ -42,3 +42,6 @@ test-ledger-redis-process:
 
 test-edge:
 	python3 scripts/test-edge.py
+
+test-node-transport:
+	cd node && cargo test --offline socks5h
