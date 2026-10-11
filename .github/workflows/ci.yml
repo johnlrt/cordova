@@ -151,6 +151,9 @@ jobs:
           '
           docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --describe --topic cordova.account.usage.v1 || true
           docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --describe --group cordova-usage-projection-v1 || true
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T kafka /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --list --topic cordova.account.usage.v1 || true
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T kafka /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --list --group cordova-usage-projection-v1 || true
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T kafka /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --list --cluster || true
       - name: Verify M1 request and edge acceptance flows
         run: |
           make smoke
