@@ -166,9 +166,11 @@ func TestTieredRouterLoadsVerifiedOnDiskModelBeforeClaim(t *testing.T) {
 
 func TestTieredRouterAllowsAbsentQueryWithoutHashAndReturnsWarming(t *testing.T) {
 	status := tieredStatus(5, ModelOnDisk, 50, 2)
+	// Hold the background download so its later Load call cannot race this assertion.
+	downloadRelease := make(chan struct{})
 	controller := &tieredControllerStub{states: map[string]RemoteModelStatus{
 		status.NodeID: {State: ModelAbsent},
-	}, downloadStarted: make(chan string, 1)}
+	}, downloadStarted: make(chan string, 1), downloadRelease: downloadRelease}
 	router, _ := newTieredRouterForTest(t, []NodeStatus{status}, controller)
 
 	if _, err := router.Acquire(context.Background(), api.ModelID, nil, time.Now().Add(time.Minute)); !errors.Is(err, requestcoord.ErrModelWarming) {

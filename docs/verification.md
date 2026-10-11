@@ -61,3 +61,29 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 - `make test-ledger-redis` прошла на временной Redis-сборке; Kafka replay, tokenizer parity, SOCKS5h и wallet stagenet проверки не подтверждены.
 - `CORDOVA_TEST_REDIS_SERVER=/private/tmp/redis-8.10.2/src/redis-server make test-ledger-redis-process` прошла под `-race`: тест завершил собственный Redis после Lua append до `WAITAOF`, перезапустил его на том же AOF-каталоге, затем подтвердил orphan refund, нулевой reserved balance и journal replay. Это не проверяет убийство процесса посреди Redis-команды или replica fsync.
 - Docker daemon недоступен из-за отсутствующего `/Users/abbas/.docker/run/docker.sock`; изолированный стек не запускался.
+
+## Проверка C9 tokenizer runtime — 2026-10-11
+
+### Среда и команды
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| Go toolchain | `go1.27.2 windows/amd64` | Проверена локальная Windows-сборка; другие ОС и GPU не проверялись. |
+| `go fmt ./...` | Прошла из `server/` | Форматирование исходников helper/runtime. |
+| `go test ./...` | Все Go packages прошли, включая `cmd/tokenizer` и `internal/tokenizer` | Runtime HTTP-поведение покрыто локальными тестовыми серверами; llama.cpp и GGUF не запускались. |
+| `go vet ./...` | Прошла из `server/` | Статическая проверка Go-кода. |
+| `python scripts/contracts-check.py` | Прошла: 25 REST paths, 27 node WS types, 8 live WS types и 64 fixtures | Проверяет wire contracts/fixtures, не интеграцию native runner. |
+
+### Граница доказательства
+
+Реализованы исполняемый `cmd/tokenizer`, проверка подписи каталога, размера и SHA-256 локального GGUF, соответствия commit runner, однослотового процесса, загруженного пути и хеша chat template; unit tests подтверждают режимы `/apply-template` и `/tokenize`. Фактические token IDs, parity с Rust node, поведение закреплённой версии llama.cpp, отмена на реальном runner, очистка его слота, память и пропускная способность не проверялись: в checkout нет квалифицированных GGUF и runner release. Хеш tokenizer остаётся утверждением подписанного каталога до parity gate. B3/M2 и допуск оплаты остаются закрытыми до `make test-tokenizer-parity` на каждом принятом артефакте и закреплённом runner.
+
+## Проверка SOCKS5h transport slice — 2026-10-11
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| Go `fmt`, `test`, `vet` | Прошли локально на `go1.27.2 windows/amd64` | Для flaky warming assertion дополнительно прошли 20 повторов без `-race`; локальный Go сообщает, что race detector требует включённого cgo. |
+| GitHub Actions `go test -race -count=1 ./...` | Прошёл в PR-run для PR #22 | Отдельный push-run до тестовой синхронизации поймал race в проверке фонового model warm; её download теперь блокируется до конца утверждения и локально прошла повторный прогон. |
+| GitHub Actions Rust format, tests, clippy и dependency audit | Прошли в PR-run для PR #22, включая два новых SOCKS5h теста | Локальный Windows checkout не имеет Rust toolchain; фактический внешний SOCKS/DNS-сервер и другие ОС не использовались. |
+
+Новые локальные SOCKS-тесты проверяют, что нода передаёт непреобразованный hostname как SOCKS5 domain target, и что недоступный прокси не приводит к соединению с прямой целью. Полный B4 gate остаётся открытым до проверки reconnect, отозванных credentials, credential store и поддерживаемых платформ.

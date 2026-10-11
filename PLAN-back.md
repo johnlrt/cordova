@@ -232,12 +232,16 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - **BN2 (B0):** Run tokenizer, precision/fsync and wallet prepare/relay spikes. **Done when:** `make verify-foundations` records real versioned samples and passes faults.
 - **BN3 (B1/B2):** Build auth, gateway and mock-node SSE slice. **Done when:** `make smoke` returns the shared completion/usage flow through nginx and Kafka.
 - **BN4 (B4/B7):** Begin independent Rust transport and Redis ledger queues. **Done when:** narrow transport/replay and balance/conservation tests pass before real money integration.
+- **BN5 (B3, partial):** The authenticated helper now has a supervised llama.cpp runtime and command. Still required: a pinned and packaged runner/model, real token/template parity, chunk-boundary whole-text accounting, and the full `make test-tokenizer-parity` gate.
+- **BN6 (B4, partial):** Add deterministic SOCKS5h remote-DNS and no-direct-fallback tests. Still required: credential-store, reconnect, revoked/stale auth, and supported-OS transport evidence.
 
 ## Changelog
 
 - v1, 2026-10-08: Define Go/Rust ownership, subsystem boundaries and B0–B11 proof gates.
 - v2, 2026-10-10: Add signed-catalog validation and the gateway-side C9 client/readiness path; the native helper, admitted artifact and helper/node parity gate remain open.
 - v3, 2026-10-10: Add the C9 HTTP handler, authentication, bounded queue and strict error mapping; the runnable pinned runtime and parity evidence remain open.
+- v4, 2026-10-11: Add the supervised llama.cpp runtime and `cmd/tokenizer`; verify catalog artifact bytes, runner commit, loaded path and template hash. No model artifact or helper/node parity proof is present, so B3 remains open.
+- v5, 2026-10-11: Add focused node SOCKS5h tests and a `make test-node-transport` target; B4's reconnect, credential-store and cross-platform gates remain open.
 
 ## Open risks
 
