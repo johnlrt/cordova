@@ -822,6 +822,11 @@ where
                     "binary WebSocket messages are not supported".into(),
                 ));
             }
+            Some(Ok(Message::Close(Some(frame))))
+                if frame.reason.as_ref() == "unauthenticated" =>
+            {
+                return Err(NodeError::AuthenticationRejected);
+            }
             Some(Ok(Message::Close(_))) | None => {
                 return Err(NodeError::WebSocket(
                     "server closed the node socket before welcome".into(),
@@ -1074,6 +1079,9 @@ fn server_error(envelope: &EnvelopeIn) -> NodeError {
         .as_ref()
         .map(|error| error.code.as_str())
         .unwrap_or("internal_error");
+    if code == "unauthenticated" {
+        return NodeError::AuthenticationRejected;
+    }
     NodeError::WebSocket(format!("server returned protocol error {code}"))
 }
 
