@@ -148,10 +148,13 @@ func runM1(address string) error {
 		if len(nodeEncryptionKey) != 32 || len(nodeSigningKey) != ed25519.PrivateKeySize {
 			return errors.New("C3 inference requires the node API encryption and signing keys")
 		}
-		router, routerErr = m1.NewC3RequestRouter(store)
+		router, routerErr = m1.NewC3RequestRouter(store, inputTokenizer)
 	}
 	if routerErr != nil {
 		return routerErr
+	}
+	if closer, ok := router.(interface{ Close() error }); ok {
+		defer closer.Close()
 	}
 	pingInference := func(ctx context.Context) error {
 		if provider == nil {

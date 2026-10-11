@@ -22,6 +22,7 @@ const (
 var (
 	ErrNodeSlotUnavailable = errors.New("node has no verified available slot")
 	ErrNodeNoCapacity      = errors.New("node has no free verified capacity")
+	ErrNodeBenchmarkActive = errors.New("node model is being benchmarked")
 )
 
 type nodeCapacityProfile struct {
@@ -37,6 +38,7 @@ type nodeCapacityProfile struct {
 	VerifiedCapacityBytes uint64 `json:"verified_capacity_bytes"`
 	Rank                  int    `json:"rank"`
 	FirstTokenLatencyMS   uint64 `json:"first_token_latency_ms"`
+	VerifiedTokensPerSecondMilli uint64 `json:"verified_tokens_per_second_milli"`
 }
 
 type nodeLeaseRecord struct {
@@ -46,6 +48,7 @@ type nodeLeaseRecord struct {
 	Generation   string `json:"generation"`
 	AttemptID    string `json:"attempt_id"`
 	LeaseID      string `json:"lease_id"`
+	Kind         string `json:"kind,omitempty"`
 	ExpiresAtMS  int64  `json:"expires_at_ms"`
 	ReleasedAtMS int64  `json:"released_at_ms,omitempty"`
 }
@@ -88,7 +91,7 @@ func (s *nodeService) claimNodeSlot(ctx context.Context, nodeID, modelID, catalo
 		}
 		record := nodeLeaseRecord{NodeID: nodeID, ModelID: modelID, SessionID: sessionID,
 			Generation: strconv.FormatUint(identity.Generation, 10), AttemptID: attemptID, LeaseID: leaseID,
-			ExpiresAtMS: expiresAt.UnixMilli()}
+			ExpiresAtMS: expiresAt.UnixMilli(), Kind: "inference"}
 		encoded, err := json.Marshal(record)
 		if err != nil {
 			return nil, err
@@ -96,7 +99,7 @@ func (s *nodeService) claimNodeSlot(ctx context.Context, nodeID, modelID, catalo
 		result, err := s.redis.Eval(ctx, claimNodeSlotScript, []string{
 			nodeSessionKey(nodeID), nodeRecordKey(nodeID), nodeHeartbeatKey(nodeID),
 			nodeModelStateKey(nodeID, modelID), nodeCapacityProfileKey(nodeID, modelID),
-			nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID),
+			nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeBenchmarkLockKey(nodeID, sessionID, modelID),
 		}, sessionID, record.Generation, nodeID, identity.OwnerID, identity.SecretVersion,
 			modelID, catalogVersion, artifactSHA256, strconv.FormatUint(requiredCapacityBytes, 10), attemptID, leaseID,
 			record.ExpiresAtMS, string(encoded)).Int()
@@ -111,12 +114,147 @@ func (s *nodeService) claimNodeSlot(ctx context.Context, nodeID, modelID, catalo
 			return nil, ErrNodeConflict
 		case -2:
 			return nil, ErrNodeNoCapacity
+		case -3:
+			return nil, ErrNodeBenchmarkActive
 		default:
 			return nil, ErrNodeSlotUnavailable
 		}
 	}
 	s.peerMu.RUnlock()
 	return nil, ErrNodeSessionUnavailable
+}
+
+func nodeBenchmarkLockKey(nodeID, sessionID, modelID string) string {
+	return "cv:v1:node-benchmark-lock:" + nodeID + ":" + sessionID + ":" + modelID
+}
+
+func (s *nodeService) acquireNodeBenchmarkLock(ctx context.Context, nodeID, modelID, catalogVersion,
+	artifactSHA256, lockID string) (string, uint64, error) {
+	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) ||
+		!validNodeHash(artifactSHA256) || !validID(lockID) {
+		return "", 0, ErrInvalid
+	}
+	s.peerMu.RLock()
+	peer := s.peers[nodeID]
+	if peer == nil {
+		s.peerMu.RUnlock()
+		return "", 0, ErrNodeSessionUnavailable
+	}
+	identity, sessionID := peer.identity, peer.sessionID
+	s.peerMu.RUnlock()
+	if identity.Generation == 0 || identity.SessionID != sessionID {
+		return "", 0, ErrNodeSessionUnavailable
+	}
+	result, err := s.redis.Eval(ctx, acquireNodeBenchmarkLockScript, []string{
+		nodeSessionKey(nodeID), nodeRecordKey(nodeID), nodeHeartbeatKey(nodeID), nodeModelStateKey(nodeID, modelID),
+		nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+	}, sessionID, strconv.FormatUint(identity.Generation, 10), nodeID, identity.OwnerID,
+		identity.SecretVersion, modelID, catalogVersion, artifactSHA256, lockID, 180_000).Int()
+	if err != nil {
+		return "", 0, err
+	}
+	switch result {
+	case 1:
+		return sessionID, identity.Generation, nil
+	case -1:
+		return "", 0, ErrNodeConflict
+	case -2:
+		return "", 0, ErrNodeBenchmarkActive
+	case -3:
+		return "", 0, ErrNodeBenchmarkActive
+	default:
+		return "", 0, ErrNodeSessionUnavailable
+	}
+}
+
+func (s *nodeService) renewNodeBenchmarkLock(ctx context.Context, nodeID, sessionID, modelID, lockID string) error {
+	result, err := s.redis.Eval(ctx, renewNodeBenchmarkLockScript, []string{
+		nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+	}, lockID, 180_000).Int()
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return ErrNodeConflict
+	}
+	return nil
+}
+
+func (s *nodeService) releaseNodeBenchmarkLock(ctx context.Context, nodeID, sessionID, modelID, lockID string) {
+	if ctx == nil || ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), nodeAttemptCleanupTimeout)
+		defer cancel()
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, nodeAttemptCleanupTimeout)
+		defer cancel()
+	}
+	_, _ = s.redis.Eval(ctx, releaseNodeBenchmarkLockScript, []string{
+		nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+	}, lockID).Int()
+}
+
+func (s *nodeService) claimNodeBenchmarkSlots(ctx context.Context, nodeID, modelID, catalogVersion,
+	artifactSHA256, lockID, benchmarkID string, requiredCapacityBytes uint64, count uint32,
+	expiresAt time.Time) ([]*nodeSlotLease, error) {
+	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) ||
+		!validNodeHash(artifactSHA256) || !validID(lockID) || !validID(benchmarkID) || count == 0 || count > 64 ||
+		requiredCapacityBytes == 0 || requiredCapacityBytes > (1<<53)-1 {
+		return nil, ErrInvalid
+	}
+	s.peerMu.RLock()
+	peer := s.peers[nodeID]
+	if peer == nil {
+		s.peerMu.RUnlock()
+		return nil, ErrNodeSessionUnavailable
+	}
+	identity, sessionID := peer.identity, peer.sessionID
+	s.peerMu.RUnlock()
+	if identity.Generation == 0 || identity.SessionID != sessionID {
+		return nil, ErrNodeSessionUnavailable
+	}
+	now := time.Now().UTC()
+	expiresAt = expiresAt.UTC()
+	if !expiresAt.After(now) || expiresAt.After(now.Add(maxNodeLeaseLifetime)) {
+		return nil, ErrInvalid
+	}
+	leases := make([]*nodeSlotLease, count)
+	arguments := make([]any, 0, 13+int(count)*2)
+	arguments = append(arguments, sessionID, strconv.FormatUint(identity.Generation, 10), nodeID,
+		identity.OwnerID, identity.SecretVersion, modelID, catalogVersion, artifactSHA256,
+		strconv.FormatUint(requiredCapacityBytes, 10), lockID, benchmarkID, expiresAt.UnixMilli(), count)
+	for index := range leases {
+		leaseID, err := domain.NewID()
+		if err != nil {
+			return nil, err
+		}
+		lease := &nodeSlotLease{nodes: s, nodeID: nodeID, modelID: modelID, sessionID: sessionID,
+			generation: identity.Generation, attemptID: benchmarkID, leaseID: leaseID.String()}
+		leases[index] = lease
+		record := nodeLeaseRecord{NodeID: nodeID, ModelID: modelID, SessionID: sessionID,
+			Generation: strconv.FormatUint(identity.Generation, 10), AttemptID: benchmarkID, LeaseID: lease.leaseID,
+			ExpiresAtMS: expiresAt.UnixMilli(), Kind: "benchmark"}
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		arguments = append(arguments, lease.leaseID, string(encoded))
+	}
+	result, err := s.redis.Eval(ctx, claimNodeBenchmarkSlotsScript, []string{
+		nodeSessionKey(nodeID), nodeRecordKey(nodeID), nodeHeartbeatKey(nodeID), nodeModelStateKey(nodeID, modelID),
+		nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeBenchmarkLockKey(nodeID, sessionID, modelID),
+	}, arguments...).Int()
+	if err != nil {
+		return nil, err
+	}
+	if result != 1 {
+		if result == -1 {
+			return nil, ErrNodeConflict
+		}
+		return nil, ErrNodeSlotUnavailable
+	}
+	return leases, nil
 }
 
 func (s *nodeService) acquireNodeInferenceAttempt(ctx context.Context, nodeID, modelID, catalogVersion,
@@ -157,12 +295,15 @@ func (s *nodeService) acquireNodeInferenceAttempt(ctx context.Context, nodeID, m
 	return attempt, nil
 }
 
-func (s *nodeService) setVerifiedNodeCapacity(ctx context.Context, profile nodeCapacityProfile) error {
+func (s *nodeService) setVerifiedNodeCapacity(ctx context.Context, profile nodeCapacityProfile, sessionID string,
+	generation uint64, lockID string) error {
 	if ctx == nil || !validID(profile.NodeID) || !validModelSlug(profile.ModelID) || !validID(profile.CatalogVersion) ||
 		!validNodeHash(profile.ArtifactSHA256) || !validID(profile.BenchmarkID) || !profile.BenchmarkPassed ||
+		!validID(sessionID) || generation == 0 || !validID(lockID) ||
 		profile.VerifiedSlots == 0 || profile.VerifiedSlots > 64 || profile.VerifiedCapacityBytes == 0 ||
 		profile.VerifiedCapacityBytes > (1<<53)-1 || profile.Rank < 0 || profile.Rank > 100 || profile.FirstTokenLatencyMS == 0 ||
-		profile.FirstTokenLatencyMS > 120_000 {
+		profile.FirstTokenLatencyMS > 30_000 || profile.VerifiedTokensPerSecondMilli < 2_000 ||
+		profile.VerifiedTokensPerSecondMilli > (1<<53)-1 {
 		return ErrInvalid
 	}
 	now := time.Now().Unix()
@@ -177,18 +318,24 @@ func (s *nodeService) setVerifiedNodeCapacity(ctx context.Context, profile nodeC
 	result, err := s.redis.Eval(ctx, `
 local node_type=redis.call('TYPE',KEYS[1]).ok
 local profile_type=redis.call('TYPE',KEYS[2]).ok
-if node_type~='string' or (profile_type~='none' and profile_type~='string') then return redis.error_reply('node capacity profile key type mismatch') end
+local session_type=redis.call('TYPE',KEYS[3]).ok
+local lock_type=redis.call('TYPE',KEYS[4]).ok
+if node_type~='string' or (profile_type~='none' and profile_type~='string') or session_type~='string' or lock_type~='string' then
+  return redis.error_reply('node capacity profile key type mismatch')
+end
+if redis.call('GET',KEYS[3])~=ARGV[1]..':'..ARGV[2] or redis.call('PTTL',KEYS[4])<=0 or redis.call('GET',KEYS[4])~=ARGV[9] then return 0 end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[1]))
-if not ok or type(node)~='table' or node['id']~=ARGV[1] or node['revoked']~=false then return 0 end
+if not ok or type(node)~='table' or node['id']~=ARGV[3] or node['revoked']~=false then return 0 end
 if profile_type=='string' then
   local old_ok,old=pcall(cjson.decode,redis.call('GET',KEYS[2]))
   if not old_ok or type(old)~='table' then return redis.error_reply('node capacity profile is invalid') end
-  if old['catalog_version']==ARGV[2] and old['artifact_sha256']==ARGV[3] and tonumber(old['benchmarked_at_unix'] or '0')>tonumber(ARGV[4]) then return -1 end
+  if old['catalog_version']==ARGV[4] and old['artifact_sha256']==ARGV[5] and tonumber(old['benchmarked_at_unix'] or '0')>tonumber(ARGV[6]) then return -1 end
 end
-redis.call('SET',KEYS[2],ARGV[5],'EX',ARGV[6])
-return 1`, []string{nodeRecordKey(profile.NodeID), nodeCapacityProfileKey(profile.NodeID, profile.ModelID)},
-		profile.NodeID, profile.CatalogVersion, profile.ArtifactSHA256, profile.BenchmarkedAtUnix,
-		string(encoded), profile.ExpiresAtUnix-now).Int()
+redis.call('SET',KEYS[2],ARGV[7],'EX',ARGV[8])
+return 1`, []string{nodeRecordKey(profile.NodeID), nodeCapacityProfileKey(profile.NodeID, profile.ModelID),
+		nodeSessionKey(profile.NodeID), nodeBenchmarkLockKey(profile.NodeID, sessionID, profile.ModelID)},
+		sessionID, strconv.FormatUint(generation, 10), profile.NodeID, profile.CatalogVersion,
+		profile.ArtifactSHA256, profile.BenchmarkedAtUnix, string(encoded), profile.ExpiresAtUnix-now, lockID).Int()
 	if err != nil {
 		return err
 	}
@@ -208,6 +355,10 @@ func (l *nodeSlotLease) Release(ctx context.Context) {
 	if ctx == nil || ctx.Err() != nil {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(context.Background(), nodeAttemptCleanupTimeout)
+		defer cancel()
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, nodeAttemptCleanupTimeout)
 		defer cancel()
 	}
 	_, _ = l.nodes.redis.Eval(ctx, releaseNodeSlotScript, []string{
@@ -279,6 +430,139 @@ for i=1,#members,2 do
 end
 return active`
 
+const acquireNodeBenchmarkLockScript = `
+local session_type=redis.call('TYPE',KEYS[1]).ok
+local node_type=redis.call('TYPE',KEYS[2]).ok
+local heartbeat_type=redis.call('TYPE',KEYS[3]).ok
+local state_type=redis.call('TYPE',KEYS[4]).ok
+local leases_type=redis.call('TYPE',KEYS[5]).ok
+local details_type=redis.call('TYPE',KEYS[6]).ok
+local lock_type=redis.call('TYPE',KEYS[7]).ok
+if session_type~='string' or node_type~='string' or heartbeat_type~='string' or state_type~='string' or
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
+   (lock_type~='none' and lock_type~='string') then return redis.error_reply('node benchmark key type mismatch') end
+if redis.call('PTTL',KEYS[3])<=0 or redis.call('PTTL',KEYS[4])<=0 then return 0 end
+if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return -1 end
+local node_ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
+local state_ok,state=pcall(cjson.decode,redis.call('GET',KEYS[4]))
+if not node_ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or
+   node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false or
+   not state_ok or type(state)~='table' or state['node_id']~=ARGV[3] or state['session_id']~=ARGV[1] or
+   type(state['model'])~='table' or state['model']['model_id']~=ARGV[6] or state['model']['state']~='loaded' or
+   state['model']['artifact_sha256']~=ARGV[8] then return 0 end
+if lock_type=='string' then return -2 end
+local clock=redis.call('TIME')
+local now_sec=tonumber(clock[1])
+local now_ms=now_sec*1000+math.floor(tonumber(clock[2])/1000)
+local members=redis.call('ZRANGE',KEYS[5],0,-1,'WITHSCORES')
+if #members>32768 then return redis.error_reply('node lease index exceeds safe bounds') end
+local expired={}
+local active_for_model=0
+for i=1,#members,2 do
+  local lease_id=members[i]
+  local score=tonumber(members[i+1])
+  if score<=now_ms then
+    table.insert(expired,lease_id)
+  else
+    local raw=redis.call('HGET',KEYS[6],lease_id)
+    if not raw then return redis.error_reply('node lease index has no record') end
+    local record_ok,record=pcall(cjson.decode,raw)
+    if not record_ok or type(record)~='table' or record['lease_id']~=lease_id then return redis.error_reply('node lease record is invalid') end
+    if record['node_id']==ARGV[3] and record['session_id']==ARGV[1] and record['generation']==ARGV[2] and record['model_id']==ARGV[6] then
+      active_for_model=active_for_model+1
+    end
+  end
+end
+if active_for_model>0 then return -3 end
+for _,lease_id in ipairs(expired) do redis.call('ZREM',KEYS[5],lease_id); redis.call('HDEL',KEYS[6],lease_id) end
+local lock_ttl=tonumber(ARGV[10])
+if lock_ttl<1000 or lock_ttl>300000 then return 0 end
+redis.call('SET',KEYS[7],ARGV[9],'PX',lock_ttl)
+return 1`
+
+const renewNodeBenchmarkLockScript = `
+if redis.call('TYPE',KEYS[1]).ok~='string' then return 0 end
+if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
+local ttl=tonumber(ARGV[2])
+if ttl<1000 or ttl>300000 then return 0 end
+redis.call('PEXPIRE',KEYS[1],ttl)
+return 1`
+
+const releaseNodeBenchmarkLockScript = `
+local kind=redis.call('TYPE',KEYS[1]).ok
+if kind~='none' and kind~='string' then return redis.error_reply('node benchmark lock key type mismatch') end
+if kind=='string' and redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) end
+return 0`
+
+const claimNodeBenchmarkSlotsScript = `
+local session_type=redis.call('TYPE',KEYS[1]).ok
+local node_type=redis.call('TYPE',KEYS[2]).ok
+local heartbeat_type=redis.call('TYPE',KEYS[3]).ok
+local state_type=redis.call('TYPE',KEYS[4]).ok
+local leases_type=redis.call('TYPE',KEYS[5]).ok
+local details_type=redis.call('TYPE',KEYS[6]).ok
+local lock_type=redis.call('TYPE',KEYS[7]).ok
+if session_type~='string' or node_type~='string' or heartbeat_type~='string' or state_type~='string' or
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or lock_type~='string' then
+  return redis.error_reply('node benchmark key type mismatch')
+end
+if redis.call('PTTL',KEYS[3])<=0 or redis.call('PTTL',KEYS[4])<=0 or redis.call('PTTL',KEYS[7])<=0 then return 0 end
+if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] or redis.call('GET',KEYS[7])~=ARGV[10] then return -1 end
+local node_ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
+local state_ok,state=pcall(cjson.decode,redis.call('GET',KEYS[4]))
+if not node_ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or
+   node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false or
+   not state_ok or type(state)~='table' or state['node_id']~=ARGV[3] or state['session_id']~=ARGV[1] or
+   type(state['model'])~='table' or state['model']['model_id']~=ARGV[6] or state['model']['state']~='loaded' or
+   state['model']['artifact_sha256']~=ARGV[8] then return 0 end
+local clock=redis.call('TIME')
+local now_sec=tonumber(clock[1])
+local now_ms=now_sec*1000+math.floor(tonumber(clock[2])/1000)
+local expires_at=tonumber(ARGV[12])
+local count=tonumber(ARGV[13])
+if tonumber(ARGV[9])<=0 or tonumber(ARGV[9])>9007199254740991 or count<1 or count>64 or
+   expires_at<=now_ms or expires_at>now_ms+120000 then return 0 end
+local members=redis.call('ZRANGE',KEYS[5],0,-1,'WITHSCORES')
+if #members>32768 then return redis.error_reply('node lease index exceeds safe bounds') end
+local expired={}
+local active_for_model=0
+for i=1,#members,2 do
+  local lease_id=members[i]
+  local score=tonumber(members[i+1])
+  if score<=now_ms then
+    table.insert(expired,lease_id)
+  else
+    local raw=redis.call('HGET',KEYS[6],lease_id)
+    if not raw then return redis.error_reply('node lease index has no record') end
+    local record_ok,record=pcall(cjson.decode,raw)
+    if not record_ok or type(record)~='table' or record['lease_id']~=lease_id then return redis.error_reply('node lease record is invalid') end
+    if record['node_id']==ARGV[3] and record['session_id']==ARGV[1] and record['generation']==ARGV[2] and record['model_id']==ARGV[6] then
+      active_for_model=active_for_model+1
+    end
+  end
+end
+if active_for_model>0 then return -2 end
+local seen={}
+local records={}
+for i=0,count-1 do
+  local lease_id=ARGV[14+i*2]
+  local raw=ARGV[15+i*2]
+  local record_ok,record=pcall(cjson.decode,raw)
+  if seen[lease_id] or type(lease_id)~='string' or not record_ok or type(record)~='table' or
+     record['node_id']~=ARGV[3] or record['model_id']~=ARGV[6] or record['session_id']~=ARGV[1] or
+     record['generation']~=ARGV[2] or record['attempt_id']~=ARGV[11] or record['lease_id']~=lease_id or
+     record['kind']~='benchmark' or tonumber(record['expires_at_ms'] or '0')~=expires_at then return 0 end
+  if redis.call('ZSCORE',KEYS[5],lease_id) or redis.call('HEXISTS',KEYS[6],lease_id)==1 then return -1 end
+  seen[lease_id]=true
+  records[i+1]={lease_id,raw}
+end
+for _,lease_id in ipairs(expired) do redis.call('ZREM',KEYS[5],lease_id); redis.call('HDEL',KEYS[6],lease_id) end
+for _,pair in ipairs(records) do redis.call('ZADD',KEYS[5],expires_at,pair[1]); redis.call('HSET',KEYS[6],pair[1],pair[2]) end
+local expire_at=expires_at+60000
+redis.call('PEXPIREAT',KEYS[5],expire_at)
+redis.call('PEXPIREAT',KEYS[6],expire_at)
+return 1`
+
 const claimNodeSlotScript = `
 local session_type=redis.call('TYPE',KEYS[1]).ok
 local node_type=redis.call('TYPE',KEYS[2]).ok
@@ -287,8 +571,11 @@ local state_type=redis.call('TYPE',KEYS[4]).ok
 local profile_type=redis.call('TYPE',KEYS[5]).ok
 local leases_type=redis.call('TYPE',KEYS[6]).ok
 local details_type=redis.call('TYPE',KEYS[7]).ok
+local benchmark_lock_type=redis.call('TYPE',KEYS[8]).ok
 if session_type~='string' or node_type~='string' or heartbeat_type~='string' or state_type~='string' or profile_type~='string' or
-   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node lease key type mismatch') end
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
+   (benchmark_lock_type~='none' and benchmark_lock_type~='string') then return redis.error_reply('node lease key type mismatch') end
+if benchmark_lock_type=='string' then return -3 end
 if redis.call('PTTL',KEYS[3])<=0 or redis.call('PTTL',KEYS[4])<=0 then return 0 end
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return -1 end
 local node_ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
@@ -308,6 +595,8 @@ local lease_expiry=tonumber(ARGV[12])
 local verified_slots=tonumber(profile['verified_slots'] or '0')
 local capacity=tonumber(profile['verified_capacity_bytes'] or '0')
 if tonumber(profile['expires_at_unix'] or '0')<=now_sec or verified_slots<1 or verified_slots>64 or
+   tonumber(profile['first_token_latency_ms'] or '0')<1 or tonumber(profile['first_token_latency_ms'] or '0')>30000 or
+   tonumber(profile['verified_tokens_per_second_milli'] or '0')<2000 or
    capacity<tonumber(ARGV[9]) or lease_expiry<=now_ms or lease_expiry>now_ms+120000 then return 0 end
 local members=redis.call('ZRANGE',KEYS[6],0,-1,'WITHSCORES')
 if #members>32768 then return redis.error_reply('node lease index exceeds safe bounds') end

@@ -22,6 +22,7 @@ const (
 type c3RequestRouter struct {
 	nodes      *nodeService
 	controller *nodeModelController
+	benchmarks *nodeBenchmarkScheduler
 	catalog    NodeCatalogSnapshot
 	models     map[string]NodeCatalogManifest
 }
@@ -33,11 +34,15 @@ type c3RouteCandidate struct {
 	rank         int
 	sessionID    string
 	generation   uint64
+	hardware     nodeHardware
 }
 
-func NewC3RequestRouter(store *Store) (request.Router, error) {
+func NewC3RequestRouter(store *Store, tokenizers ...request.Tokenizer) (request.Router, error) {
 	if store == nil {
 		return nil, errors.New("M1 store is required for C3 routing")
+	}
+	if len(tokenizers) > 1 {
+		return nil, errors.New("C3 routing accepts at most one trusted tokenizer")
 	}
 	nodes, err := store.ensureNodeService(store.cfg)
 	if err != nil {
@@ -59,10 +64,20 @@ func NewC3RequestRouter(store *Store) (request.Router, error) {
 	for _, manifest := range catalog.Models {
 		router.models[manifest.Model.ID] = manifest
 	}
+	if len(tokenizers) == 1 {
+		router.benchmarks = newNodeBenchmarkScheduler(nodes, controller, catalog, router.models, tokenizers[0])
+	}
 	return router, nil
 }
 
 var _ request.Router = (*c3RequestRouter)(nil)
+
+func (r *c3RequestRouter) Close() error {
+	if r != nil && r.benchmarks != nil {
+		r.benchmarks.close()
+	}
+	return nil
+}
 
 func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded map[string]struct{}, deadline time.Time) (request.Attempt, error) {
 	if ctx == nil || r == nil || r.nodes == nil {
@@ -85,6 +100,13 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 		return nil, err
 	}
 	if len(profiles) == 0 {
+		warming, err := r.scheduleLoadedModelBenchmarks(ctx, manifest, excluded, now)
+		if err != nil {
+			return nil, err
+		}
+		if warming {
+			return nil, request.ErrModelWarming
+		}
 		return nil, request.ErrNoCapacity
 	}
 	states, err := r.queryModelStates(ctx, manifest, profiles)
@@ -129,7 +151,8 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 				return nil, ctx.Err()
 			}
 			if !errors.Is(err, ErrNodeNoCapacity) && !errors.Is(err, ErrNodeSlotUnavailable) &&
-				!errors.Is(err, ErrNodeSessionUnavailable) && !errors.Is(err, ErrNodeConflict) {
+				!errors.Is(err, ErrNodeSessionUnavailable) && !errors.Is(err, ErrNodeConflict) &&
+				!errors.Is(err, ErrNodeBenchmarkActive) {
 				return nil, err
 			}
 		}
@@ -139,6 +162,37 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 
 func (r *c3RequestRouter) freshProfiles(ctx context.Context, manifest NodeCatalogManifest, requiredCapacity uint64,
 	excluded map[string]struct{}, now time.Time) ([]c3RouteCandidate, error) {
+	peers, err := r.freshLivePeers(ctx, excluded, now)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]c3RouteCandidate, 0, len(peers))
+	for _, peer := range peers {
+		profileBytes, err := r.nodes.redis.Get(ctx, nodeCapacityProfileKey(peer.nodeID, manifest.Model.ID)).Bytes()
+		if err == redis.Nil {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var profile nodeCapacityProfile
+		if decodeStrictBytes(profileBytes, &profile) != nil || profile.NodeID != peer.nodeID ||
+			profile.ModelID != manifest.Model.ID || profile.CatalogVersion != r.catalog.Version ||
+			profile.ArtifactSHA256 != manifest.ArtifactSHA256 || !profile.BenchmarkPassed || profile.Rank == 0 ||
+			profile.VerifiedSlots == 0 || profile.VerifiedSlots > 64 || profile.VerifiedCapacityBytes < requiredCapacity ||
+			profile.VerifiedCapacityBytes > (1<<53)-1 || profile.BenchmarkedAtUnix <= 0 || profile.BenchmarkedAtUnix > now.Unix() ||
+			profile.ExpiresAtUnix <= now.Unix() || profile.ExpiresAtUnix > profile.BenchmarkedAtUnix+int64(nodeCapacityProfileMaxAge.Seconds()) ||
+			profile.Rank < 0 || profile.Rank > 100 || profile.FirstTokenLatencyMS == 0 || profile.FirstTokenLatencyMS > 30_000 ||
+			profile.VerifiedTokensPerSecondMilli < 2_000 || profile.VerifiedTokensPerSecondMilli > (1<<53)-1 {
+			continue
+		}
+		peer.profile = profile
+		result = append(result, peer)
+	}
+	return result, nil
+}
+
+func (r *c3RequestRouter) freshLivePeers(ctx context.Context, excluded map[string]struct{}, now time.Time) ([]c3RouteCandidate, error) {
 	r.nodes.peerMu.RLock()
 	peers := make([]*nodePeer, 0, len(r.nodes.peers))
 	for nodeID, peer := range r.nodes.peers {
@@ -148,7 +202,7 @@ func (r *c3RequestRouter) freshProfiles(ctx context.Context, manifest NodeCatalo
 		peers = append(peers, peer)
 	}
 	r.nodes.peerMu.RUnlock()
-	if len(peers) >= maxC3RoutingCandidates {
+	if len(peers) > maxC3RoutingCandidates {
 		rand.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
 		peers = peers[:maxC3RoutingCandidates]
 	}
@@ -173,27 +227,36 @@ func (r *c3RequestRouter) freshProfiles(ctx context.Context, manifest NodeCatalo
 		if err != nil || received.After(now) || now.Sub(received) >= nodeHeartbeatLimit {
 			continue
 		}
-		profileBytes, err := r.nodes.redis.Get(ctx, nodeCapacityProfileKey(peer.identity.NodeID, manifest.Model.ID)).Bytes()
-		if err == redis.Nil {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		var profile nodeCapacityProfile
-		if decodeStrictBytes(profileBytes, &profile) != nil || profile.NodeID != peer.identity.NodeID ||
-			profile.ModelID != manifest.Model.ID || profile.CatalogVersion != r.catalog.Version ||
-			profile.ArtifactSHA256 != manifest.ArtifactSHA256 || !profile.BenchmarkPassed || profile.Rank == 0 ||
-			profile.VerifiedSlots == 0 || profile.VerifiedSlots > 64 || profile.VerifiedCapacityBytes < requiredCapacity ||
-			profile.VerifiedCapacityBytes > (1<<53)-1 || profile.BenchmarkedAtUnix <= 0 || profile.BenchmarkedAtUnix > now.Unix() ||
-			profile.ExpiresAtUnix <= now.Unix() || profile.ExpiresAtUnix > profile.BenchmarkedAtUnix+int64(nodeCapacityProfileMaxAge.Seconds()) ||
-			profile.Rank < 0 || profile.Rank > 100 || profile.FirstTokenLatencyMS > 120_000 {
-			continue
-		}
-		result = append(result, c3RouteCandidate{nodeID: peer.identity.NodeID, profile: profile,
-			sessionID: peer.sessionID, generation: peer.identity.Generation})
+		result = append(result, c3RouteCandidate{nodeID: peer.identity.NodeID,
+			sessionID: peer.sessionID, generation: peer.identity.Generation, hardware: heartbeat.Payload.Hardware})
 	}
 	return result, nil
+}
+
+func (r *c3RequestRouter) scheduleLoadedModelBenchmarks(ctx context.Context, manifest NodeCatalogManifest,
+	excluded map[string]struct{}, now time.Time) (bool, error) {
+	if r.benchmarks == nil {
+		return false, nil
+	}
+	peers, err := r.freshLivePeers(ctx, excluded, now)
+	if err != nil || len(peers) == 0 {
+		return false, err
+	}
+	states, err := r.queryModelStates(ctx, manifest, peers)
+	if err != nil {
+		return false, err
+	}
+	scheduled := false
+	for _, peer := range peers {
+		state, ok := states[peer.nodeID]
+		if !ok || state.State != "loaded" || state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
+			continue
+		}
+		if r.benchmarks.schedule(peer.nodeID, manifest.Model.ID, peer.hardware) {
+			scheduled = true
+		}
+	}
+	return scheduled, nil
 }
 
 func (r *c3RequestRouter) queryModelStates(ctx context.Context, manifest NodeCatalogManifest,
