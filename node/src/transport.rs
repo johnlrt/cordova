@@ -702,17 +702,48 @@ async fn run_session(
     result
 }
 
-type ActiveInference = (String, CancellationToken, Option<String>);
+struct ActiveInference {
+    leases: Vec<String>,
+    cancellation: CancellationToken,
+    cancel_request_id: Option<String>,
+}
 
 #[derive(Clone, Default)]
 struct HashMapActive(Arc<Mutex<std::collections::HashMap<String, ActiveInference>>>);
 
 impl HashMapActive {
     async fn insert(&self, attempt: String, lease: String, token: CancellationToken) {
-        self.0.lock().await.insert(attempt, (lease, token, None));
+        self.insert_many(attempt, vec![lease], token).await;
     }
-    async fn contains(&self, attempt: &str) -> bool {
-        self.0.lock().await.contains_key(attempt)
+    async fn insert_many(&self, attempt: String, leases: Vec<String>, token: CancellationToken) {
+        self.0.lock().await.insert(
+            attempt,
+            ActiveInference {
+                leases,
+                cancellation: token,
+                cancel_request_id: None,
+            },
+        );
+    }
+    async fn insert_many_if_absent(
+        &self,
+        attempt: String,
+        leases: Vec<String>,
+        token: CancellationToken,
+    ) -> bool {
+        let mut active = self.0.lock().await;
+        if active.contains_key(&attempt) {
+            return false;
+        }
+        active.insert(
+            attempt,
+            ActiveInference {
+                leases,
+                cancellation: token,
+                cancel_request_id: None,
+            },
+        );
+        true
     }
     async fn remove(&self, attempt: &str) {
         self.0.lock().await.remove(attempt);
@@ -723,7 +754,7 @@ impl HashMapActive {
             .lock()
             .await
             .values()
-            .map(|(lease, _, _)| lease.clone())
+            .flat_map(|active| active.leases.iter().cloned())
             .collect::<Vec<_>>();
         leases.sort();
         leases.dedup();
@@ -731,10 +762,10 @@ impl HashMapActive {
     }
     async fn cancel(&self, attempt: &str, lease: &str, request_id: String) -> bool {
         let mut active = self.0.lock().await;
-        if let Some((active_lease, token, cancel_request_id)) = active.get_mut(attempt) {
-            if active_lease == lease {
-                *cancel_request_id = Some(request_id);
-                token.cancel();
+        if let Some(active_attempt) = active.get_mut(attempt) {
+            if active_attempt.leases.iter().any(|active_lease| active_lease == lease) {
+                active_attempt.cancel_request_id = Some(request_id);
+                active_attempt.cancellation.cancel();
                 return true;
             }
         }
@@ -746,7 +777,7 @@ impl HashMapActive {
             .lock()
             .await
             .get(attempt)
-            .and_then(|(_, _, request_id)| request_id.clone())
+            .and_then(|active| active.cancel_request_id.clone())
     }
 
     async fn cancel_all(&self) -> Vec<CancellationToken> {
@@ -754,7 +785,7 @@ impl HashMapActive {
             .lock()
             .await
             .values()
-            .map(|(_, token, _)| token.clone())
+            .map(|active| active.cancellation.clone())
             .collect()
     }
 }
@@ -1285,11 +1316,12 @@ async fn handle_benchmark(
     };
     protocol::validate_uuid(&start.benchmark_id)?;
     if start.max_tokens != 256
-        || start.required_concurrency != 1
-        || start.leases.len() != 1
-        || start.leases[0].slot_index != 0
+        || start.required_concurrency == 0
+        || start.required_concurrency > 64
+        || start.leases.len() != start.required_concurrency as usize
         || start.input_token_ids.is_empty()
         || start.input_token_ids.len() > 8192
+        || start.input_token_ids.iter().any(|token| *token > i32::MAX as u32)
         || start.seed > i32::MAX as u32
     {
         return send_benchmark_error(
@@ -1302,7 +1334,21 @@ async fn handle_benchmark(
         )
         .await;
     }
-    protocol::validate_uuid(&start.leases[0].lease_id)?;
+    let mut lease_ids = HashSet::with_capacity(start.leases.len());
+    for (index, lease) in start.leases.iter().enumerate() {
+        if lease.slot_index != index as u32 || !lease_ids.insert(lease.lease_id.clone()) {
+            return send_benchmark_error(
+                outbound,
+                &session,
+                Some(request_id),
+                "invalid_message",
+                "Benchmark slot leases are invalid.",
+                false,
+            )
+            .await;
+        }
+        protocol::validate_uuid(&lease.lease_id)?;
+    }
     let deadline = match protocol::deadline_instant(&start.deadline_at) {
         Ok(deadline) => deadline.min(Instant::now() + Duration::from_secs(120)),
         Err(_) => {
@@ -1365,7 +1411,15 @@ async fn handle_benchmark(
         }
     };
     let active_key = format!("benchmark:{}", start.benchmark_id);
-    if active.contains(&active_key).await {
+    let cancellation = CancellationToken::new();
+    if !active
+        .insert_many_if_absent(
+            active_key.clone(),
+            start.leases.iter().map(|lease| lease.lease_id.clone()).collect(),
+            cancellation.clone(),
+        )
+        .await
+    {
         return send_benchmark_error(
             outbound,
             &session,
@@ -1376,88 +1430,112 @@ async fn handle_benchmark(
         )
         .await;
     }
-    let lease = start.leases[0].lease_id.clone();
-    let cancellation = CancellationToken::new();
-    active
-        .insert(active_key.clone(), lease.clone(), cancellation.clone())
-        .await;
     let job_out = outbound.clone();
     let job_session = session.clone();
     tasks.spawn(async move {
-        let (delta_tx, mut delta_rx) = mpsc::channel::<crate::llama::Delta>(32);
-        let pump_out = job_out.clone();
-        let pump_session = job_session.clone();
-        let pump_start = start.clone();
-        let pump_request = request_id.clone();
-        let pump = tokio::spawn(async move {
-            while let Some(delta) = delta_rx.recv().await {
-                let payload = crate::protocol::BenchmarkDelta {
-                    benchmark_id: pump_start.benchmark_id.clone(),
-                    slot_index: 0,
-                    lease_id: pump_start.leases[0].lease_id.clone(),
-                    chunk_index: delta.chunk_index,
-                    text: delta.text,
-                };
-                if pump_out
-                    .send(
-                        "benchmark.delta",
-                        payload,
-                        Some(pump_request.clone()),
-                        pump_session.clone(),
-                    )
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        let generated = runner
-            .generate_benchmark(
-                &start.input_token_ids,
-                start.max_tokens,
-                start.seed,
-                cancellation,
-                deadline,
-                delta_tx,
-            )
-            .await;
-        let _ = pump.await;
-        match generated {
-            Ok(generated) => {
-                let _ = job_out
-                    .send(
-                        "benchmark.result",
-                        crate::protocol::BenchmarkResult {
-                            benchmark_id: start.benchmark_id,
-                            slots: vec![crate::protocol::BenchmarkSlotResult {
-                                slot_index: 0,
-                                lease_id: lease,
-                                claimed_output_tokens: generated.output_tokens,
-                                finish_reason: generated.finish_reason.into(),
-                            }],
-                            reported_peak_vram_bytes: 0,
-                            completed_slots: 1,
-                        },
-                        Some(request_id),
-                        job_session,
+        let benchmark_id = start.benchmark_id.clone();
+        let input_token_ids = Arc::new(start.input_token_ids.clone());
+        let mut slot_tasks = JoinSet::new();
+        for lease in start.leases.iter().cloned() {
+            let runner = Arc::clone(&runner);
+            let input_token_ids = Arc::clone(&input_token_ids);
+            let cancellation = cancellation.clone();
+            let outbound = job_out.clone();
+            let session = job_session.clone();
+            let request_id = request_id.clone();
+            let benchmark_id = benchmark_id.clone();
+            let max_tokens = start.max_tokens;
+            let seed = start.seed;
+            let slot_deadline = deadline;
+            slot_tasks.spawn(async move {
+                let (delta_tx, mut delta_rx) = mpsc::channel::<crate::llama::Delta>(32);
+                let pump = tokio::spawn(async move {
+                    while let Some(delta) = delta_rx.recv().await {
+                        let payload = crate::protocol::BenchmarkDelta {
+                            benchmark_id: benchmark_id.clone(),
+                            slot_index: lease.slot_index,
+                            lease_id: lease.lease_id.clone(),
+                            chunk_index: delta.chunk_index,
+                            text: delta.text,
+                        };
+                        if outbound
+                            .send("benchmark.delta", payload, Some(request_id.clone()), session.clone())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                let generated = runner
+                    .generate_benchmark(
+                        &input_token_ids,
+                        max_tokens,
+                        seed,
+                        cancellation,
+                        slot_deadline,
+                        delta_tx,
                     )
                     .await;
-            }
-            Err(error) => {
-                let (code, retryable) = inference_error_code(&error);
-                let _ = send_benchmark_error(
-                    &job_out,
-                    &job_session,
-                    Some(request_id),
-                    code,
-                    "Benchmark inference failed on this node.",
-                    retryable,
-                )
-                .await;
+                let _ = pump.await;
+                (lease.slot_index, lease.lease_id, generated)
+            });
+        }
+
+        let mut completed = Vec::with_capacity(start.leases.len());
+        let mut failure = None;
+        while let Some(joined) = slot_tasks.join_next().await {
+            match joined {
+                Ok((slot_index, lease_id, Ok(generated))) => {
+                    completed.push(crate::protocol::BenchmarkSlotResult {
+                        slot_index,
+                        lease_id,
+                        claimed_output_tokens: generated.output_tokens,
+                        finish_reason: generated.finish_reason.into(),
+                    });
+                }
+                Ok((_, _, Err(error))) => {
+                    if failure.is_none() {
+                        failure = Some(inference_error_code(&error));
+                    }
+                    cancellation.cancel();
+                }
+                Err(_) => {
+                    if failure.is_none() {
+                        failure = Some(("inference_failed", true));
+                    }
+                    cancellation.cancel();
+                }
             }
         }
         active.remove(&active_key).await;
+        if let Some((code, retryable)) = failure {
+            let _ = send_benchmark_error(
+                &job_out,
+                &job_session,
+                Some(request_id),
+                code,
+                "Benchmark inference failed on this node.",
+                retryable,
+            )
+            .await;
+            return;
+        }
+        completed.sort_by_key(|slot| slot.slot_index);
+        let completed_slots = completed.len() as u32;
+        let _ = job_out
+            .send(
+                "benchmark.result",
+                crate::protocol::BenchmarkResult {
+                    benchmark_id,
+                    slots: completed,
+                    reported_peak_vram_bytes: 0,
+                    completed_slots,
+                },
+                Some(request_id),
+                job_session,
+            )
+            .await;
     });
     Ok(())
 }
@@ -1544,6 +1622,36 @@ async fn wait_for_shutdown() {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn benchmark_tracks_and_cancels_every_server_lease_as_one_job() {
+        let active = HashMapActive::default();
+        let cancellation = CancellationToken::new();
+        let benchmark = "benchmark:00000000-0000-4000-8000-000000000001".to_owned();
+        let leases = vec![
+            "00000000-0000-4000-8000-000000000002".to_owned(),
+            "00000000-0000-4000-8000-000000000003".to_owned(),
+        ];
+
+        assert!(
+            active
+                .insert_many_if_absent(benchmark.clone(), leases.clone(), cancellation.clone())
+                .await
+        );
+        assert!(
+            !active
+                .insert_many_if_absent(benchmark.clone(), leases.clone(), CancellationToken::new())
+                .await,
+            "a concurrent duplicate benchmark must not replace the original cancellation token"
+        );
+        assert_eq!(active.lease_ids().await, leases);
+        assert!(active.cancel(&benchmark, &leases[1], "cancel-request".to_owned()).await);
+        assert!(cancellation.is_cancelled());
+        assert_eq!(active.cancel_request_id(&benchmark).await.as_deref(), Some("cancel-request"));
+
+        active.remove(&benchmark).await;
+        assert!(active.lease_ids().await.is_empty());
+    }
 
     #[tokio::test]
     async fn socks5h_sends_hostname_to_proxy_without_local_resolution() {
