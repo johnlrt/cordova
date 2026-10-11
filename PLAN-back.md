@@ -236,6 +236,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 ## Changelog
 
 - v1, 2026-10-08: Define Go/Rust ownership, subsystem boundaries and B0–B11 proof gates.
+- v2, 2026-10-11: Add the offline Ed25519 catalog signer and signing procedure; production model artifact qualification and M0 parity evidence remain open.
 
 ## Open risks
 

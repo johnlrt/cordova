@@ -33,8 +33,10 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalogData, catalogKey := signedNodeCatalogForTest(t)
 	config := Config{Origin: "https://nodes.example.test", PrivacyNoticeVersion: "v1", Pepper: []byte(strings.Repeat("p", 32)),
-		NodeSecretEncryptionKey: []byte(strings.Repeat("e", 32)), NodeJWTSigningKey: signingKey}
+		NodeSecretEncryptionKey: []byte(strings.Repeat("e", 32)), NodeJWTSigningKey: signingKey,
+		NodeCatalogSnapshot: catalogData, NodeCatalogPublicKey: catalogKey}
 	store, err := NewStore(client, config)
 	if err != nil {
 		t.Fatal(err)
@@ -90,8 +92,11 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 		t.Fatal("issued test access token is already expired")
 	}
 
-	first, firstSession := dialTestNode(t, wsURL, firstToken, node.ID)
+	first, firstSession, firstCatalogVersion := dialTestNode(t, wsURL, firstToken, node.ID)
 	defer first.Close()
+	if firstCatalogVersion != nodeCatalogTestVersion {
+		t.Fatalf("welcome catalog version=%q", firstCatalogVersion)
+	}
 	catalogRequest, _ := domain.NewID()
 	catalogMessage, _ := domain.NewID()
 	writeTestNodeFrame(t, first, 2, "catalog.get", catalogMessage.String(), catalogRequest.String(), firstSession, map[string]any{"known_version": nil})
@@ -103,8 +108,12 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 		Version string            `json:"version"`
 		Models  []json.RawMessage `json:"models"`
 	}
-	if err := json.Unmarshal(catalog.Payload, &snapshot); err != nil || snapshot.Version != nodeCatalogVersion || len(snapshot.Models) != 0 {
+	if err := json.Unmarshal(catalog.Payload, &snapshot); err != nil || snapshot.Version != firstCatalogVersion || len(snapshot.Models) != 1 {
 		t.Fatalf("catalog snapshot=%+v err=%v", snapshot, err)
+	}
+	var delivered NodeCatalogManifest
+	if err := json.Unmarshal(snapshot.Models[0], &delivered); err != nil || delivered.Model.ID != "cordova-chat-small-v1" || delivered.Signature == "" {
+		t.Fatalf("catalog manifest=%+v err=%v", delivered, err)
 	}
 	// A retransmission with the same message ID and payload gets a fresh-sequence acknowledgement.
 	writeTestNodeFrame(t, first, 3, "catalog.get", catalogMessage.String(), catalogRequest.String(), firstSession, map[string]any{"known_version": nil})
@@ -141,8 +150,11 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 		t.Fatalf("model state was not persisted: value=%q err=%v", storedState, err)
 	}
 
-	second, secondSession := dialTestNode(t, wsURL, secondToken, node.ID)
+	second, secondSession, secondCatalogVersion := dialTestNode(t, wsURL, secondToken, node.ID)
 	defer second.Close()
+	if secondCatalogVersion != firstCatalogVersion {
+		t.Fatalf("reconnected welcome catalog version=%q want=%q", secondCatalogVersion, firstCatalogVersion)
+	}
 	if firstSession == secondSession {
 		t.Fatal("reconnect reused the previous session ID")
 	}
@@ -162,7 +174,7 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	}
 }
 
-func dialTestNode(t *testing.T, wsURL, token, nodeID string) (*websocket.Conn, string) {
+func dialTestNode(t *testing.T, wsURL, token, nodeID string) (*websocket.Conn, string, string) {
 	t.Helper()
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second, EnableCompression: false}
 	header := http.Header{}
@@ -189,7 +201,13 @@ func dialTestNode(t *testing.T, wsURL, token, nodeID string) (*websocket.Conn, s
 	if session == nil || !validID(*session) {
 		t.Fatal("welcome omitted a valid session ID")
 	}
-	return conn, *session
+	var welcomePayload struct {
+		CatalogVersion string `json:"catalog_version"`
+	}
+	if err := json.Unmarshal(welcome.Payload, &welcomePayload); err != nil || !validID(welcomePayload.CatalogVersion) {
+		t.Fatalf("welcome catalog version=%q err=%v", welcomePayload.CatalogVersion, err)
+	}
+	return conn, *session, welcomePayload.CatalogVersion
 }
 
 func testNodeHeartbeat() map[string]any {

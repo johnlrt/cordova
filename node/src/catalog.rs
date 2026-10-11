@@ -203,6 +203,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn verifies_shared_go_catalog_signature_vector() {
+        let mut config = Config {
+            catalog_public_key: Some("p/bfr484uJuozmSbWU+R5NAf3Ff5yUk99DteUKmYc2c=".into()),
+            ..Config::default()
+        };
+        config
+            .allowed_model_hosts
+            .push("models.example.test".into());
+        let snapshot: crate::protocol::CatalogSnapshot = serde_json::from_str(include_str!(
+            "../../contracts/fixtures/ws/node-catalog-snapshot.json"
+        ))
+        .expect("shared catalog fixture parses");
+        assert_eq!(snapshot.version, "00000000-0000-4000-8000-000000000002");
+        assert_eq!(snapshot.models.len(), 1);
+        snapshot.models[0]
+            .verify(&config)
+            .expect("Go signature verifies in Rust");
+        snapshot.models[0]
+            .check_url(&config)
+            .expect("fixture host is allowlisted");
+    }
+
+    #[test]
     fn accepts_only_canonical_money_strings() {
         assert!(is_money("0"));
         assert!(is_money("9000000000000000000"));

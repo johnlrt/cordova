@@ -1,0 +1,31 @@
+{
+  "version": "00000000-0000-4000-8000-000000000002",
+  "models": [
+    {
+      "model": {
+        "id": "cordova-chat-small-v1",
+        "object": "model",
+        "created": 1,
+        "owned_by": "cordova",
+        "context_tokens": 4096,
+        "max_output_tokens": 2048,
+        "input_rate_piconero_per_million": "0",
+        "output_rate_piconero_per_million": "0",
+        "owner_share_bps": 8000,
+        "price_version": "00000000-0000-4000-8000-000000000001"
+      },
+      "artifact_url": "https://models.example.test/cordova-chat-small-v1.gguf?download=1&source=catalog",
+      "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "artifact_size_bytes": 1024,
+      "tokenizer_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "template_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "llama_commit": "dddddddddddddddddddddddddddddddddddddddd",
+      "add_bos": true,
+      "min_memory_bytes": 1073741824,
+      "memory_per_slot_bytes": 1073741824,
+      "license_spdx": "Apache-2.0",
+      "version": "00000000-0000-4000-8000-000000000001",
+      "signature": "Q40P+MAIAxnl9U9/ueqF2YTzqSdtFFpqHnqx6W434lcvhjEzbPbKjUHNPmL3lMjOdBF/yUGWQqDu3U/7RmyZBg=="
+    }
+  ]
+}
