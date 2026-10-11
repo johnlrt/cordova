@@ -38,12 +38,13 @@ def main() -> int:
         required_kafka_settings = {
             "KAFKA_NODE_ID": "1",
             "KAFKA_PROCESS_ROLES": "broker,controller",
-            "KAFKA_LISTENERS": "SASL_PLAINTEXT://:9092,CONTROLLER://:9093",
+            "KAFKA_LISTENERS": "SASL_PLAINTEXT://:9092,CONTROLLER://127.0.0.1:9093",
             "KAFKA_ADVERTISED_LISTENERS": "SASL_PLAINTEXT://kafka:9092",
+            "KAFKA_CONTROLLER_QUORUM_VOTERS": "1@127.0.0.1:9093",
             "KAFKA_SASL_ENABLED_MECHANISMS": "PLAIN",
             "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "false",
             "KAFKA_AUTHORIZER_CLASS_NAME": "org.apache.kafka.metadata.authorizer.StandardAuthorizer",
-            "KAFKA_SUPER_USERS": "User:admin",
+            "KAFKA_SUPER_USERS": "User:admin;User:ANONYMOUS",
             "KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND": "false",
         }
         if any(str(kafka_environment.get(key, "")) != value for key, value in required_kafka_settings.items()):
