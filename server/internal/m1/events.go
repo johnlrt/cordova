@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -23,6 +24,11 @@ type Events struct {
 	topic        string
 	consumerName string
 }
+
+type kafkaPublishError struct{ err error }
+
+func (e *kafkaPublishError) Error() string { return "Kafka rejected usage metadata" }
+func (e *kafkaPublishError) Unwrap() error { return e.err }
 
 func NewEvents(client *redis.Client, brokers string) (*Events, error) {
 	if client == nil || strings.TrimSpace(brokers) == "" {
@@ -103,6 +109,17 @@ func (e *Events) ensureOutboxGroup(ctx context.Context) error {
 }
 
 func (e *Events) runOutbox(ctx context.Context) error {
+	var lastKafkaFailureLog time.Time
+	logKafkaFailure := func(err error) {
+		var publishErr *kafkaPublishError
+		if !errors.As(err, &publishErr) {
+			return
+		}
+		if lastKafkaFailureLog.IsZero() || time.Since(lastKafkaFailureLog) >= 30*time.Second {
+			log.Printf("Kafka usage event delivery deferred: %v", publishErr.err)
+			lastKafkaFailureLog = time.Now()
+		}
+	}
 	for ctx.Err() == nil {
 		messages, _, err := e.redis.XAutoClaim(ctx, &redis.XAutoClaimArgs{Stream: "cv:v1:outbox:usage", Group: "usage-publisher-v1", Consumer: e.consumerName, MinIdle: time.Millisecond, Start: "0-0", Count: 32}).Result()
 		if err != nil && err != redis.Nil {
@@ -110,6 +127,7 @@ func (e *Events) runOutbox(ctx context.Context) error {
 		}
 		if err == nil && len(messages) > 0 {
 			if err := e.publishBatch(ctx, messages); err != nil {
+				logKafkaFailure(err)
 				if !wait(ctx, time.Second) {
 					return nil
 				}
@@ -134,6 +152,7 @@ func (e *Events) runOutbox(ctx context.Context) error {
 		}
 		for _, stream := range streams {
 			if err := e.publishBatch(ctx, stream.Messages); err != nil {
+				logKafkaFailure(err)
 				if !wait(ctx, time.Second) {
 					return nil
 				}
@@ -163,7 +182,7 @@ func (e *Events) publishBatch(ctx context.Context, messages []redis.XMessage) er
 		}
 		record := &kgo.Record{Topic: e.topic, Key: []byte(accountID), Value: []byte(payload), Timestamp: time.Now().UTC()}
 		if err := e.producer.ProduceSync(ctx, record).FirstErr(); err != nil {
-			return errors.New("Kafka rejected usage metadata")
+			return &kafkaPublishError{err: err}
 		}
 		if err := e.redis.Eval(ctx, `
 local stream_type=redis.call('TYPE',KEYS[1]).ok
