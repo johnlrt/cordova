@@ -99,25 +99,35 @@ func (a *rankAggregation) add(message redis.XMessage) error {
 			a.latencies = append(a.latencies, uint64(*payload.FirstTokenMS))
 		}
 		if payload.ClaimDeviation {
-			if err := a.addFraudSignal(message, arrival, fraudClaimDeviation); err != nil {
+			if err := a.addFraudSignal(message, arrival, payload.ModelID, fraudClaimDeviation); err != nil {
 				return err
 			}
 		}
 		if benchmark, exists := a.benchmarks[payload.ModelID]; exists &&
 			!arrival.Before(benchmark.arrival) && arrival.Sub(benchmark.arrival) <= benchmarkMaxAge {
 			if code := throughputFraudSignal(payload, benchmark.payload); code != "" {
-				if err := a.addFraudSignal(message, arrival, code); err != nil {
+				if err := a.addFraudSignal(message, arrival, payload.ModelID, code); err != nil {
 					return err
 				}
+			}
+		}
+	case "node.canary":
+		var payload CanaryPayload
+		if err := json.Unmarshal([]byte(payloadText), &payload); err != nil || !validUUID(payload.CanaryID) {
+			return errors.New("rank canary payload is invalid")
+		}
+		if !payload.Passed {
+			if err := a.addCanaryFraudSignal(message, arrival, payload); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-func (a *rankAggregation) addFraudSignal(message redis.XMessage, observedAt time.Time, code string) error {
+func (a *rankAggregation) addFraudSignal(message redis.XMessage, observedAt time.Time, modelID, code string) error {
 	eventID, ok := streamField(message.Values, "event_id")
-	if !ok || !validUUID(eventID) {
+	if !ok || !validUUID(eventID) || !validModelSlug(modelID) {
 		return errors.New("fraud signal source event ID is invalid")
 	}
 	requestID, ok := streamField(message.Values, "request_id")
@@ -129,7 +139,19 @@ func (a *rankAggregation) addFraudSignal(message redis.XMessage, observedAt time
 		return errors.New("fraud signal attempt ID is invalid")
 	}
 	a.fraudSignals = append(a.fraudSignals, fraudSignal{SourceEventID: eventID, RequestID: requestID,
-		AttemptID: attemptID, Code: code, ObservedAt: observedAt.UTC().Format(time.RFC3339Nano)})
+		AttemptID: attemptID, ModelID: modelID, Code: code, ObservedAt: observedAt.UTC().Format(time.RFC3339Nano)})
+	return nil
+}
+
+func (a *rankAggregation) addCanaryFraudSignal(message redis.XMessage, observedAt time.Time, payload CanaryPayload) error {
+	eventID, ok := streamField(message.Values, "event_id")
+	if !ok || !validUUID(eventID) || !validUUID(payload.CanaryID) || !validModelSlug(payload.ModelID) ||
+		!validModelSlug(payload.CanaryVersion) || !validCanaryFailureCode(payload.FailureCode) {
+		return errors.New("canary review signal identifiers are invalid")
+	}
+	a.fraudSignals = append(a.fraudSignals, fraudSignal{SourceEventID: eventID, CanaryID: payload.CanaryID,
+		ModelID: payload.ModelID, CanaryVersion: payload.CanaryVersion, DetailCode: payload.FailureCode,
+		Code: fraudCanaryFailure, ObservedAt: observedAt.UTC().Format(time.RFC3339Nano)})
 	return nil
 }
 
@@ -296,17 +318,30 @@ func (w *Worker) persistFraudSignals(ctx context.Context, nodeID string, signals
 	}
 	stream := "cv:v1:rank-fraud-signals:" + nodeID
 	for _, signal := range signals {
-		if !validUUID(signal.SourceEventID) || !validUUID(signal.RequestID) || !validUUID(signal.AttemptID) ||
-			(signal.Code != fraudClaimDeviation && signal.Code != fraudHighThroughput && signal.Code != fraudLowThroughput) {
+		if !validUUID(signal.SourceEventID) || !validFraudSignal(signal) {
 			return errors.New("invalid fraud review signal")
 		}
 		dedupe := "cv:v1:ranker-fraud-signal:" + nodeID + ":" + signal.SourceEventID + ":" + signal.Code
 		if err := w.redis.Eval(ctx, persistFraudSignalScript, []string{stream, dedupe}, signal.SourceEventID,
-			signal.RequestID, signal.AttemptID, signal.Code, signal.ObservedAt).Err(); err != nil {
+			signal.RequestID, signal.AttemptID, signal.Code, signal.CanaryID, signal.ModelID,
+			signal.CanaryVersion, signal.DetailCode, signal.ObservedAt).Err(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func validFraudSignal(signal fraudSignal) bool {
+	switch signal.Code {
+	case fraudCanaryFailure:
+		return validUUID(signal.CanaryID) && signal.RequestID == "" && signal.AttemptID == "" &&
+			validModelSlug(signal.ModelID) && validModelSlug(signal.CanaryVersion) && validCanaryFailureCode(signal.DetailCode)
+	case fraudClaimDeviation, fraudHighThroughput, fraudLowThroughput:
+		return validUUID(signal.RequestID) && validUUID(signal.AttemptID) && signal.CanaryID == "" &&
+			validModelSlug(signal.ModelID) && signal.CanaryVersion == "" && signal.DetailCode == ""
+	default:
+		return false
+	}
 }
 
 const persistFraudSignalScript = `
@@ -318,7 +353,8 @@ end
 local inserted=redis.call('SET',KEYS[2],'1','NX','EX',604800)
 if inserted then
   local appended=redis.pcall('XADD',KEYS[1],'*','source_event_id',ARGV[1],'request_id',ARGV[2],
-    'attempt_id',ARGV[3],'signal_code',ARGV[4],'observed_at',ARGV[5])
+	    'attempt_id',ARGV[3],'signal_code',ARGV[4],'canary_id',ARGV[5],'model_id',ARGV[6],
+	    'canary_version',ARGV[7],'detail_code',ARGV[8],'observed_at',ARGV[9])
   if type(appended)=='table' and appended['err'] then
     redis.call('DEL',KEYS[2])
     return redis.error_reply(appended['err'])

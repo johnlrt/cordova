@@ -5,6 +5,7 @@ import (
 )
 
 const (
+	fraudCanaryFailure  = "t02_canary_failure"
 	fraudClaimDeviation = "t01_claim_deviation"
 	fraudHighThroughput = "t03_high_throughput"
 	fraudLowThroughput  = "t03_low_throughput"
@@ -14,8 +15,21 @@ type fraudSignal struct {
 	SourceEventID string
 	RequestID     string
 	AttemptID     string
+	CanaryID      string
+	ModelID       string
+	CanaryVersion string
+	DetailCode    string
 	Code          string
 	ObservedAt    string
+}
+
+func validCanaryFailureCode(value string) bool {
+	switch value {
+	case "invalid_format", "nonce_mismatch", "property_mismatch", "runner_timeout", "runner_error", "tokenizer_error":
+		return true
+	default:
+		return false
+	}
 }
 
 // throughputFraudSignal compares one server-measured request with the

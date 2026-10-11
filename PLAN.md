@@ -393,7 +393,7 @@ Prefix keys `cv:v1:`; one standalone primary supports cross-account scripts. Nev
 | `model-nodes:<slug>` / `node-model:<node>:<slug>` | Candidate set / state hash with artifact and verified slots | Projection rebuildable; do not expire leased state |
 | `rank:<node>` / `rank-events:<node>` | Versioned rank hash / content-free Redis-arrival event stream, trimmed to 48h; `ranker-nodes` indexes node IDs for periodic recompute | Current / 48h |
 | `rank-sequence:<node>` / `ranker-event:<event_id>` / `ranker-session:<node>` | Last accepted source sequence / event dedupe marker / currently fenced session | Until node removal / 7d / current session |
-| `rank-fraud-signals:<node>` / `ranker-fraud-signal:<node>:<event>:<code>` | Content-free T01/T03 review signals / seven-day dedupe marker | 7d / 7d |
+| `rank-fraud-signals:<node>` / `ranker-fraud-signal:<node>:<event>:<code>` | Content-free T01/T02/T03 review signals with model/canary version and fixed detail code / seven-day dedupe marker | 7d / 7d |
 | `ranker-nodes` / `node-quarantine:<node>` | Set of node IDs with rank event history / operator-or-fraud quarantine marker | Remove index member on node removal / until quarantine release |
 | `outbox-sequence:node:<node>` / `outbox:node` | Per-node event sequence / durable validated node-event envelopes awaiting Kafka acknowledgement | Until node removal / until acknowledged |
 | `consumer-offset:<group>:<topic>:<partition>` / `outbox:rank` | Last atomically projected Kafka offset / durable rank-change events awaiting broker acknowledgement | Durable / until acknowledged |
@@ -422,7 +422,7 @@ Kafka JSON envelope: `{v:1,event_id:Id,event_type,occurred_at,observed_at,node_i
 
 | Topic / partition key | Events and payload fields | Consumers / retention |
 | --- | --- | --- |
-| `cordova.node.events.v1` / node ID | `node.join:{session_id}`, `node.leave:{session_id,reason}`, `node.heartbeat:{session_id,latency_ms,model_states:NodeModel[]}`, `node.benchmark:{benchmark_id,model_id,tested_capacity_bytes,verified_slots,verified_output_tokens,elapsed_ms,passed}`, `node.request_outcome:{model_id,outcome:success|failure|cancelled,elapsed_ms,first_token_ms:null|integer,verified_output_tokens,claim_deviation:bool}` | `ranker-v1`; 6 partitions, delete after 7d |
+| `cordova.node.events.v1` / node ID | `node.join:{session_id}`, `node.leave:{session_id,reason}`, `node.heartbeat:{session_id,latency_ms,model_states:NodeModel[]}`, `node.benchmark:{benchmark_id,model_id,tested_capacity_bytes,verified_slots,verified_output_tokens,elapsed_ms,passed}`, `node.request_outcome:{model_id,outcome:success|failure|cancelled,elapsed_ms,first_token_ms:null|integer,verified_output_tokens,claim_deviation:bool}`, `node.canary:{canary_id,model_id,canary_version,passed,failure_code}` | `ranker-v1`; 6 partitions, delete after 7d |
 | `cordova.node.rank.v1` / node ID | `node.rank_changed:{rank,formula_version,updated_at}` | Live projection worker; compact by node; delete obsolete tombstones after 7d |
 | `cordova.account.usage.v1` / account ID | `request.updated:{account_id,model_id,status,input_tokens,output_tokens,charged_piconero,latency_ms:null|integer,revision}` | Analytics/live workers; 6 partitions, 30d; sensitive ACL |
 | `cordova.events.dlq.v1` / original event ID | `event.invalid:{source_topic,partition,offset,error_code,source_event_id}`; retain no malformed raw payload | Operator review; 1 partition, 7d |

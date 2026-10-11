@@ -206,27 +206,49 @@ func TestRedisFraudSignalsAreContentFreeAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream := "cv:v1:rank-fraud-signals:" + nodeID.String()
-	marker := "cv:v1:ranker-fraud-signal:" + nodeID.String() + ":" + eventID.String() + ":" + fraudClaimDeviation
-	if err := client.Del(ctx, stream, marker).Err(); err != nil {
+	canaryEventID, err := domain.NewID()
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = client.Del(ctx, stream, marker).Err() })
+	canaryID, err := domain.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := "cv:v1:rank-fraud-signals:" + nodeID.String()
+	marker := "cv:v1:ranker-fraud-signal:" + nodeID.String() + ":" + eventID.String() + ":" + fraudClaimDeviation
+	canaryMarker := "cv:v1:ranker-fraud-signal:" + nodeID.String() + ":" + canaryEventID.String() + ":" + fraudCanaryFailure
+	if err := client.Del(ctx, stream, marker, canaryMarker).Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Del(ctx, stream, marker, canaryMarker).Err() })
 	worker := &Worker{redis: client}
 	signal := fraudSignal{SourceEventID: eventID.String(), RequestID: requestID.String(), AttemptID: attemptID.String(),
-		Code: fraudClaimDeviation, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	if err := worker.persistFraudSignals(ctx, nodeID.String(), []fraudSignal{signal, signal}); err != nil {
+		ModelID: "cordova-chat-small-v1", Code: fraudClaimDeviation, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	canarySignal := fraudSignal{SourceEventID: canaryEventID.String(), CanaryID: canaryID.String(),
+		ModelID: "cordova-chat-small-v1", CanaryVersion: "arith-json-v1", DetailCode: "property_mismatch",
+		Code: fraudCanaryFailure, ObservedAt: signal.ObservedAt}
+	if err := worker.persistFraudSignals(ctx, nodeID.String(), []fraudSignal{signal, signal, canarySignal, canarySignal}); err != nil {
 		t.Fatal(err)
 	}
 	messages, err := client.XRange(ctx, stream, "-", "+").Result()
-	if err != nil || len(messages) != 1 {
-		t.Fatalf("fraud signal stream = %#v, %v; want exactly one idempotent signal", messages, err)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("fraud signal stream = %#v, %v; want one idempotent T01 and T02 signal", messages, err)
 	}
-	message := messages[0]
-	if message.Values["source_event_id"] != eventID.String() || message.Values["request_id"] != requestID.String() ||
-		message.Values["attempt_id"] != attemptID.String() || message.Values["signal_code"] != fraudClaimDeviation ||
-		message.Values["prompt"] != nil || message.Values["response"] != nil {
-		t.Fatalf("fraud signal contains invalid or content-bearing fields: %#v", message.Values)
+	seen := make(map[string]bool, len(messages))
+	for _, message := range messages {
+		code, _ := streamField(message.Values, "signal_code")
+		seen[code] = true
+		if message.Values["prompt"] != nil || message.Values["response"] != nil {
+			t.Fatalf("fraud signal contains content-bearing fields: %#v", message.Values)
+		}
+		if code == fraudCanaryFailure && (message.Values["canary_id"] != canaryID.String() ||
+			message.Values["model_id"] != "cordova-chat-small-v1" || message.Values["canary_version"] != "arith-json-v1" ||
+			message.Values["detail_code"] != "property_mismatch") {
+			t.Fatalf("canary review signal omitted canary ID: %#v", message.Values)
+		}
+	}
+	if !seen[fraudClaimDeviation] || !seen[fraudCanaryFailure] {
+		t.Fatalf("persisted fraud signal codes = %v", seen)
 	}
 }
 

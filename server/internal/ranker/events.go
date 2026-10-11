@@ -71,6 +71,14 @@ type RequestOutcomePayload struct {
 	ClaimDeviation       bool    `json:"claim_deviation"`
 }
 
+type CanaryPayload struct {
+	CanaryID      string `json:"canary_id"`
+	ModelID       string `json:"model_id"`
+	CanaryVersion string `json:"canary_version"`
+	Passed        bool   `json:"passed"`
+	FailureCode   string `json:"failure_code"`
+}
+
 type eventEnvelope struct {
 	Version    int             `json:"v"`
 	EventID    string          `json:"event_id"`
@@ -158,6 +166,15 @@ func DecodeNodeEvent(data []byte) (NodeEvent, error) {
 			!validModelSlug(payload.ModelID) || (payload.Outcome != "success" && payload.Outcome != "failure" && payload.Outcome != "cancelled") ||
 			payload.ElapsedMS == 0 || payload.ElapsedMS > 120_000 ||
 			(payload.FirstTokenMS != nil && *payload.FirstTokenMS > payload.ElapsedMS) || payload.VerifiedOutputTokens > 1_000_000 {
+			return NodeEvent{}, ErrInvalidEvent
+		}
+		event.Payload = payload
+	case "node.canary":
+		var payload CanaryPayload
+		if envelope.RequestID != nil || envelope.AttemptID != nil ||
+			decodePayload(envelope.Payload, &payload, "canary_id", "model_id", "canary_version", "passed", "failure_code") != nil ||
+			!validUUID(payload.CanaryID) || !validModelSlug(payload.ModelID) || !validModelSlug(payload.CanaryVersion) ||
+			(payload.Passed && payload.FailureCode != "") || (!payload.Passed && !validCanaryFailureCode(payload.FailureCode)) {
 			return NodeEvent{}, ErrInvalidEvent
 		}
 		event.Payload = payload

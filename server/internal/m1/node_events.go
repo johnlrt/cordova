@@ -50,7 +50,7 @@ func prepareNodeEvent(nodeID, eventType string, requestID, attemptID *string, pa
 		return "", "", "", "", ErrInvalid
 	}
 	if eventType != "node.join" && eventType != "node.leave" && eventType != "node.heartbeat" &&
-		eventType != "node.benchmark" && eventType != "node.request_outcome" {
+		eventType != "node.benchmark" && eventType != "node.request_outcome" && eventType != "node.canary" {
 		return "", "", "", "", ErrInvalid
 	}
 	if !validOptionalNodeID(requestID) || !validOptionalNodeID(attemptID) {

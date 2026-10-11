@@ -118,4 +118,24 @@ func TestRankAggregationBuildsContentFreeT01AndT03ReviewSignals(t *testing.T) {
 	}
 }
 
+func TestRankAggregationBuildsT02CanaryReviewSignalWithoutRequestIDs(t *testing.T) {
+	aggregate := newRankAggregation(time.Now().UTC())
+	canary := CanaryPayload{CanaryID: "00000000-0000-4000-8000-000000000050", ModelID: "cordova-chat-small-v1",
+		CanaryVersion: "arith-json-v1", Passed: false, FailureCode: "property_mismatch"}
+	message := rankMessage("1791720003000-0", "node.canary", canary)
+	message.Values["event_id"] = "00000000-0000-4000-8000-000000000051"
+	message.Values["request_id"], message.Values["attempt_id"] = "", ""
+	if err := aggregate.add(message); err != nil {
+		t.Fatal(err)
+	}
+	if len(aggregate.fraudSignals) != 1 {
+		t.Fatalf("canary fraud signals = %+v", aggregate.fraudSignals)
+	}
+	signal := aggregate.fraudSignals[0]
+	if signal.Code != fraudCanaryFailure || signal.CanaryID != canary.CanaryID || signal.RequestID != "" || signal.AttemptID != "" ||
+		signal.ModelID != canary.ModelID || signal.CanaryVersion != canary.CanaryVersion || signal.DetailCode != canary.FailureCode {
+		t.Fatalf("canary signal = %+v", signal)
+	}
+}
+
 func uint32Pointer(value uint32) *uint32 { return &value }
