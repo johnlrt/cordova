@@ -15,7 +15,9 @@ services:
       CORDOVA_PRIVACY_NOTICE_VERSION: privacy-v1
       CORDOVA_REDIS_URL: redis://redis:6379/0
       CORDOVA_REDIS_PASSWORD_FILE: /run/secrets/redis_password
-      CORDOVA_KAFKA_BROKERS: redpanda:9092
+      CORDOVA_KAFKA_BROKERS: kafka:9092
+      CORDOVA_KAFKA_SASL_USERNAME: cordova_gateway
+      CORDOVA_KAFKA_SASL_PASSWORD_FILE: /run/secrets/kafka_app_password
       CORDOVA_MOCK_NODE_URL: wss://mock-node:8090/ws
       CORDOVA_MOCK_NODE_TOKEN_FILE: /run/secrets/mock_node_token
       CORDOVA_MOCK_NODE_CA_FILE: /run/secrets/dev_ca
@@ -25,12 +27,13 @@ services:
       - app_pepper
       - redis_password
       - mock_node_token
+      - kafka_app_password
       - source: dev_ca
         target: dev_ca
     depends_on:
       redis:
         condition: service_healthy
-      redpanda:
+      kafka:
         condition: service_healthy
       usage-topic-init:
         condition: service_completed_successfully
@@ -111,52 +114,68 @@ services:
       timeout: 3s
       retries: 20
 
-  redpanda:
-    image: redpandadata/redpanda:v24.3.17
-    command:
-      - redpanda
-      - start
-      - --mode
-      - dev-container
-      - --smp
-      - "1"
-      - --memory
-      - 768M
-      - --reserve-memory
-      - 0M
-      - --node-id
-      - "0"
-      - --check=false
-      - --kafka-addr
-      - internal://0.0.0.0:9092
-      - --advertise-kafka-addr
-      - internal://redpanda:9092
-      - --set
-      - redpanda.auto_create_topics_enabled=true
-    volumes: [redpanda-data:/var/lib/redpanda/data]
+  kafka:
+    image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: SASL_PLAINTEXT://:9092,CONTROLLER://127.0.0.1:9093
+      KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SASL_PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_SUPER_USERS: User:admin;User:ANONYMOUS
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+      KAFKA_OPTS: -Djava.security.auth.login.config=/run/secrets/kafka_server_jaas
+    secrets:
+      - source: kafka_server_jaas
+        target: kafka_server_jaas
+      - source: kafka_admin_properties
+        target: kafka_admin_properties
+    volumes: [kafka-data:/var/lib/kafka/data]
     networks: [private]
+    tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 256
     mem_limit: 1g
     restart: unless-stopped
     healthcheck:
-      test: [CMD, rpk, cluster, info, --brokers, redpanda:9092, --print-brokers]
+      test: [CMD-SHELL, /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties >/dev/null 2>&1]
       interval: 10s
       timeout: 5s
       retries: 20
 
   usage-topic-init:
-    image: redpandadata/redpanda:v24.3.17
+    image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
     entrypoint: [/bin/sh, -ec]
     command:
       - >-
-        rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092 >/dev/null 2>&1 ||
-        rpk topic create --brokers redpanda:9092 --partitions 1 --replicas 1 cordova.account.usage.v1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --describe --topic cordova.account.usage.v1 >/dev/null 2>&1 ||
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --create --partitions 1 --replication-factor 1 --config retention.ms=2592000000 --topic cordova.account.usage.v1;
+        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --add --allow-principal User:cordova_gateway --operation Write --operation Describe --topic cordova.account.usage.v1;
+        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --add --allow-principal User:cordova_gateway --operation IdempotentWrite --cluster;
+        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --add --allow-principal User:cordova_gateway --operation Read --operation Describe --topic cordova.account.usage.v1;
+        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --add --allow-principal User:cordova_gateway --operation Read --operation Describe --group cordova-usage-projection-v1
     depends_on:
-      redpanda:
+      kafka:
         condition: service_healthy
     networks: [private]
+    secrets:
+      - source: kafka_admin_properties
+        target: kafka_admin_properties
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -201,7 +220,7 @@ networks:
 
 volumes:
   redis-data:
-  redpanda-data:
+  kafka-data:
 
 secrets:
   app_pepper:
@@ -220,3 +239,9 @@ secrets:
     file: ../.local/mock-node.crt
   mock_node_key:
     file: ../.local/mock-node.key
+  kafka_app_password:
+    file: ../.local/kafka-app-password
+  kafka_admin_properties:
+    file: ../.local/kafka-admin.properties
+  kafka_server_jaas:
+    file: ../.local/kafka-server-jaas.conf

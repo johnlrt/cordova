@@ -60,6 +60,31 @@ make_leaf() {
 write_secret app-pepper
 write_secret redis-password
 write_secret mock-node-token
+write_secret kafka-admin-password
+write_secret kafka-app-password
+
+if [[ -L "$LOCAL/kafka-server-jaas.conf" || -L "$LOCAL/kafka-admin.properties" ]]; then
+  echo "refusing symlink for generated Kafka credentials" >&2
+  exit 1
+fi
+admin_password="$(cat "$LOCAL/kafka-admin-password")"
+app_password="$(cat "$LOCAL/kafka-app-password")"
+cat > "$LOCAL/kafka-server-jaas.conf" <<EOF
+KafkaServer {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="admin"
+  password="$admin_password"
+  user_admin="$admin_password"
+  user_cordova_gateway="$app_password";
+};
+EOF
+cat > "$LOCAL/kafka-admin.properties" <<EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="$admin_password";
+EOF
+chmod 600 "$LOCAL/kafka-server-jaas.conf" "$LOCAL/kafka-admin.properties"
+
 make_ca
 make_leaf edge "/CN=localhost" "DNS:localhost,IP:127.0.0.1"
 make_leaf mock-node "/CN=mock-node" "DNS:mock-node"

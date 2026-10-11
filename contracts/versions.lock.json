@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "images": {
+    "apache-kafka": {
+      "version": "4.3.1",
+      "reference": "apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837",
+      "index_digest": "sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837",
+      "platforms": ["linux/amd64", "linux/arm64"],
+      "license": "Apache-2.0",
+      "signature": {"status": "unverified"},
+      "upstream": "https://kafka.apache.org/downloads/",
+      "digest_source": "https://hub.docker.com/layers/apache/kafka/4.3.1"
+    }
+  }
+}
