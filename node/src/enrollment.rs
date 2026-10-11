@@ -268,8 +268,13 @@ pub async fn issue_access_token(
 
 fn auth_response(response: Response) -> Result<Response> {
     let status = response.status();
+    check_auth_status(status)?;
+    Ok(response)
+}
+
+fn check_auth_status(status: StatusCode) -> Result<()> {
     if status.is_success() {
-        return Ok(response);
+        return Ok(());
     }
     if status == StatusCode::TOO_MANY_REQUESTS
         || status == StatusCode::REQUEST_TIMEOUT
@@ -367,5 +372,30 @@ mod tests {
         assert!(has_256_bits(&URL_SAFE_NO_PAD.encode([7u8; 32])));
         assert!(!has_256_bits(&"11".repeat(16)));
         assert!(!has_256_bits("not-a-random-secret"));
+    }
+
+    #[test]
+    fn authentication_statuses_separate_temporary_failures_from_rejections() {
+        assert!(check_auth_status(StatusCode::OK).is_ok());
+
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(matches!(check_auth_status(status), Err(NodeError::Http(_))));
+        }
+
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+        ] {
+            assert!(matches!(
+                check_auth_status(status),
+                Err(NodeError::AuthenticationRejected)
+            ));
+        }
     }
 }
