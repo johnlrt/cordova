@@ -44,4 +44,4 @@ test-edge:
 	python3 scripts/test-edge.py
 
 test-node-transport:
-	cd node && cargo test --offline socks5h
+	cd node && cargo test --locked --offline --workspace

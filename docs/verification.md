@@ -86,4 +86,8 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 | GitHub Actions `go test -race -count=1 ./...` | Прошёл в PR-run для PR #22 | Отдельный push-run до тестовой синхронизации поймал race в проверке фонового model warm; её download теперь блокируется до конца утверждения и локально прошла повторный прогон. |
 | GitHub Actions Rust format, tests, clippy и dependency audit | Прошли в PR-run для PR #22, включая два новых SOCKS5h теста | Локальный Windows checkout не имеет Rust toolchain; фактический внешний SOCKS/DNS-сервер и другие ОС не использовались. |
 
-Новые локальные SOCKS-тесты проверяют, что нода передаёт непреобразованный hostname как SOCKS5 domain target, и что недоступный прокси не приводит к соединению с прямой целью. Полный B4 gate остаётся открытым до проверки reconnect, отозванных credentials, credential store и поддерживаемых платформ.
+Новые Rust-тесты проверяют, что нода передаёт непреобразованный hostname как SOCKS5 domain target, выполняет username/password negotiation и не соединяется с прямой целью при недоступном прокси. Полный B4 gate остаётся открытым до transport smoke, который докажет поведение reconnect, отозванных credentials, credential store и поддерживаемых платформ.
+
+### Обработка отказа node-auth — 2026-10-11
+
+Клиент завершает сессию после постоянного отказа авторизации (`401` на challenge, token или WebSocket handshake, а также WS close/error `unauthenticated`), а `408`, `429` и `5xx` оставляет для повторного подключения с backoff. GitHub Actions на Linux прошёл Rust format, workspace tests, clippy и dependency audit для коммита `8bd41d7`, включая HTTP-статусы, WebSocket 401 и close-frame `unauthenticated`. Реальный отзыв node-secret, проверка системного хранилища credentials и transport smoke на поддерживаемых ОС не выполнялись, поэтому B4 остаётся открытым.
