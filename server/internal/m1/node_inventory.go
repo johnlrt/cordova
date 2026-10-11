@@ -237,13 +237,22 @@ func (s *nodeService) renameNode(ctx context.Context, accountID, nodeID, name st
 	}
 	result, err := s.redis.Eval(ctx, `
 local node_type=redis.call('TYPE',KEYS[1]).ok
+local revision_type=redis.call('TYPE',KEYS[2]).ok
+local live_type=redis.call('TYPE',KEYS[3]).ok
 if node_type=='none' then return 0 end
-if node_type~='string' then return redis.error_reply('node record key type mismatch') end
+if node_type~='string' or (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node record key type mismatch') end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(node)~='table' or node['id']~=ARGV[1] or node['owner_id']~=ARGV[2] or node['revoked']~=false then return 0 end
+if node['name']==ARGV[3] then return 1 end
 node['name']=ARGV[3]
 redis.call('SET',KEYS[1],cjson.encode(node))
-return 1`, []string{nodeRecordKey(nodeID)}, nodeID, accountID, name).Int()
+local revision=redis.call('INCR',KEYS[2])
+redis.call('XADD',KEYS[3],'MAXLEN',10000,'*','topic','nodes','resource_id',ARGV[1],'revision',tostring(revision),'action','invalidate')
+local now=redis.call('TIME')
+local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
+redis.call('XTRIM',KEYS[3],'MINID',cutoff)
+redis.call('EXPIRE',KEYS[3],86400)
+return 1`, []string{nodeRecordKey(nodeID), nodeRevisionKey(nodeID), accountLiveKey(accountID)}, nodeID, accountID, name).Int()
 	if err != nil {
 		return nodeView{}, err
 	}
@@ -276,20 +285,29 @@ local node_type=redis.call('TYPE',KEYS[1]).ok
 local index_type=redis.call('TYPE',KEYS[4]).ok
 local leases_type=redis.call('TYPE',KEYS[5]).ok
 local details_type=redis.call('TYPE',KEYS[6]).ok
+local revision_type=redis.call('TYPE',KEYS[7]).ok
+local live_type=redis.call('TYPE',KEYS[8]).ok
 if node_type=='none' then return 0 end
 if node_type~='string' or (index_type~='none' and index_type~='zset') or
-   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node revoke key type mismatch') end
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node revoke key type mismatch') end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(node)~='table' or node['id']~=ARGV[1] or node['owner_id']~=ARGV[2] then return 0 end
 if node['revoked']~=true then
   node['revoked']=true
   node['secret_version']=(tonumber(node['secret_version']) or 0)+1
   redis.call('SET',KEYS[1],cjson.encode(node))
+  local revision=redis.call('INCR',KEYS[7])
+  redis.call('XADD',KEYS[8],'MAXLEN',10000,'*','topic','nodes','resource_id',ARGV[1],'revision',tostring(revision),'action','invalidate')
+  local now=redis.call('TIME')
+  local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
+  redis.call('XTRIM',KEYS[8],'MINID',cutoff)
+  redis.call('EXPIRE',KEYS[8],86400)
 end
 redis.call('DEL',KEYS[2],KEYS[3],KEYS[5],KEYS[6])
 redis.call('ZREM',KEYS[4],ARGV[3])
 return 1`, []string{nodeRecordKey(nodeID), nodeSessionKey(nodeID), nodeHeartbeatKey(nodeID),
-		nodeOwnerIndexKey(accountID), nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID)}, nodeID, accountID, member).Int()
+		nodeOwnerIndexKey(accountID), nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeRevisionKey(nodeID), accountLiveKey(accountID)}, nodeID, accountID, member).Int()
 	if err != nil {
 		return err
 	}

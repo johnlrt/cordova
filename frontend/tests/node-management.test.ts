@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchNode, fetchNodes, linkNode, renameNode, revokeNode } from '../src/lib/api/account.ts';
+import { fetchNode, fetchNodes, linkNode, prepareNodeModel, renameNode, revokeNode } from '../src/lib/api/account.ts';
 import { ApiFailure } from '../src/lib/api/client.ts';
 
 const nodeID = '706134d8-0590-437c-ab24-bb9c396c815b';
@@ -69,6 +69,35 @@ test('node mutations validate inputs before making requests and send same-origin
       { url: `/api/nodes/${nodeID}`, method: 'PATCH', csrf, body: JSON.stringify({ name: 'new workstation' }) },
       { url: `/api/nodes/${nodeID}/revoke`, method: 'POST', csrf, body: '{}' }
     ]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('model preparation validates the model slug and accepts only typed queued states', async () => {
+  const originalFetch = globalThis.fetch;
+  let url = '';
+  let init: RequestInit | undefined;
+  globalThis.fetch = async (input, options) => {
+    url = String(input);
+    init = options;
+    return Response.json({ model_id: 'cordova-chat-small-v1', status: 'preparing' }, { status: 202 });
+  };
+  try {
+    await assert.rejects(prepareNodeModel('../outside', 'cordova-chat-small-v1', csrf), ApiFailure);
+    await assert.rejects(prepareNodeModel(nodeID, 'Bad Model', csrf), ApiFailure);
+    assert.equal(url, '');
+
+    assert.deepEqual(await prepareNodeModel(nodeID, 'cordova-chat-small-v1', csrf), {
+      model_id: 'cordova-chat-small-v1', status: 'preparing'
+    });
+    assert.equal(url, `/api/nodes/${nodeID}/models/cordova-chat-small-v1/prepare`);
+    assert.equal(init?.method, 'POST');
+    assert.equal(new Headers(init?.headers).get('X-CSRF-Token'), csrf);
+    assert.equal(init?.credentials, 'same-origin');
+    assert.deepEqual(JSON.parse(String(init?.body)), {});
+
+    globalThis.fetch = async () => Response.json({ model_id: 'cordova-chat-small-v1', status: 'unknown' }, { status: 202 });
+    await assert.rejects(prepareNodeModel(nodeID, 'cordova-chat-small-v1', csrf), (error: unknown) =>
+      error instanceof ApiFailure && error.code === 'invalid_response');
   } finally { globalThis.fetch = originalFetch; }
 });
 

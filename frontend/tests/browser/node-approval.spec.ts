@@ -11,7 +11,8 @@ const secondNodeID = '806134d8-0590-437c-ab24-bb9c396c815b';
 const baseNode: Node = {
   id: nodeID, name: 'new-device', status: 'enrolling', rank: null, rank_updated_at: null, hardware: null,
   verified_capacity_bytes: null, measured_tokens_per_second: null, latency_ms: null, uptime_ratio: null,
-  success_ratio: null, last_seen_at: null, models: [], earnings_pending_piconero: null,
+  success_ratio: null, last_seen_at: null, models: [{ model_id: 'cordova-chat-small-v1', state: 'on_disk', active_slots: 0,
+    max_slots: 0, verified_capacity_bytes: 0, updated_at: '2026-10-09T10:00:00Z' }], earnings_pending_piconero: null,
   earnings_available_piconero: null, hold_until: null
 };
 
@@ -24,6 +25,7 @@ async function openManagement(page: Page, options: {
   let capturedCode = '';
   let capturedName = '';
   let revokeCount = 0;
+  let prepareCount = 0;
   let nodes = [...(options.initialNodes ?? [])];
   let release!: () => void;
   let started!: () => void;
@@ -77,6 +79,10 @@ async function openManagement(page: Page, options: {
       revokeCount++;
       nodes = nodes.filter((node) => node.id !== nodeID);
       await route.fulfill({ status: 204, body: '' });
+    } else if (path === `/api/nodes/${nodeID}/models/cordova-chat-small-v1/prepare` && request.method() === 'POST') {
+      prepareCount++;
+      expect(request.headers()['x-csrf-token']).toBe(csrf);
+      await route.fulfill({ status: 202, json: { model_id: 'cordova-chat-small-v1', status: 'preparing' } });
     } else {
       await route.fulfill({ status: 404, json: { error: { message: 'Not found.', type: 'invalid_request_error', param: null, code: 'not_found' }, request_id: account.id } });
     }
@@ -88,6 +94,7 @@ async function openManagement(page: Page, options: {
     code: () => capturedCode,
     name: () => capturedName,
     revokeCount: () => revokeCount,
+    prepareCount: () => prepareCount,
     status: (value: number) => { responseStatus = value; },
     hold: (value: boolean) => { hold = value; },
     waitStarted: () => requestStarted,
@@ -189,4 +196,15 @@ test('[nodes] filters inventory, loads another page, renames and revokes a node 
   await expect(page.getByRole('heading', { name: 'Your nodes' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'remote-box' })).toBeVisible();
   expect(api.revokeCount()).toBe(1);
+});
+
+test('[nodes] requests preparation for an owner node model', async ({ page }) => {
+  const api = await openManagement(page, { initialNodes: [{ ...baseNode, status: 'online' }] });
+  await page.locator('.node-detail-link').first().click();
+  await page.waitForURL(`**/dashboard/nodes/${nodeID}`);
+  const prepare = page.getByRole('button', { name: 'Prepare model cordova-chat-small-v1' });
+  await expect(prepare).toBeVisible();
+  await prepare.click();
+  await expect(page.getByRole('status')).toContainText('Preparation for cordova-chat-small-v1 started');
+  expect(api.prepareCount()).toBe(1);
 });

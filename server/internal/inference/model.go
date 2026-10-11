@@ -11,8 +11,10 @@ const (
 )
 
 type RemoteModelStatus struct {
-	State          ModelResidency
-	ArtifactSHA256 string
+	State              ModelResidency
+	ArtifactSHA256     string
+	AvailableDiskBytes uint64
+	ReasonCode         *string
 }
 
 type ModelController interface {

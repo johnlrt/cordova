@@ -25,6 +25,8 @@ test('frontend boundary fixtures match generated M1 REST schemas', () => {
     ['rest/node-link-request.json', 'NodeLinkRequest', true],
     ['rest/node-link-request-invalid-code.json', 'NodeLinkRequest', false],
     ['rest/node-rename-request.json', 'NodeRenameRequest', true],
+    ['rest/node-model-preparation.json', 'NodeModelPreparation', true],
+    ['rest/node-model-preparation-wrong-status.json', 'NodeModelPreparation', false],
     ['rest/key-valid.json', 'ApiKey', true],
     ['rest/key-numeric-cap.json', 'ApiKey', false],
     ['rest/balance-valid.json', 'Balance', true],

@@ -61,11 +61,12 @@ func (c *nodeModelController) queryForSession(ctx context.Context, nodeID, model
 	}
 	var state nodeModelStatePayload
 	if frame.Type != "model.state" || decodeNodePayload(frame.Payload, &state,
-		"model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code") != nil ||
+		"model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code", "available_disk_bytes") != nil ||
 		state.ModelID != modelID || !validNodeModelState(state) {
 		return inference.RemoteModelStatus{}, errors.New("node returned invalid model state")
 	}
-	status := inference.RemoteModelStatus{State: inference.ModelResidency(state.State)}
+	status := inference.RemoteModelStatus{State: inference.ModelResidency(state.State),
+		AvailableDiskBytes: state.AvailableDiskBytes, ReasonCode: state.ReasonCode}
 	if state.ArtifactSHA256 != nil {
 		status.ArtifactSHA256 = *state.ArtifactSHA256
 	}
@@ -105,6 +106,10 @@ func (c *nodeModelController) loadVerifiedForSession(ctx context.Context, nodeID
 
 func (c *nodeModelController) downloadVerified(ctx context.Context, nodeID, modelID, catalogVersion string) (nodeModelReady, error) {
 	return c.runModelCommand(ctx, nodeID, modelID, catalogVersion, "model.download")
+}
+
+func (c *nodeModelController) downloadVerifiedForSession(ctx context.Context, nodeID, modelID, catalogVersion, sessionID string) (nodeModelReady, error) {
+	return c.runModelCommandForSession(ctx, nodeID, modelID, catalogVersion, "model.download", sessionID)
 }
 
 func (c *nodeModelController) runModelCommand(ctx context.Context, nodeID, modelID, catalogVersion, operation string) (nodeModelReady, error) {

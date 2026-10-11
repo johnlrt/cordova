@@ -197,7 +197,11 @@ local device_type=redis.call('TYPE',KEYS[3]).ok
 local user_type=redis.call('TYPE',KEYS[4]).ok
 local index_type=redis.call('TYPE',KEYS[5]).ok
 local daily_type=redis.call('TYPE',KEYS[6]).ok
-if enrollment_type~='string' or (node_type~='none' and node_type~='string') or (device_type~='none' and device_type~='string') or user_type~='string' or (index_type~='none' and index_type~='zset') or (daily_type~='none' and daily_type~='string') then return redis.error_reply('node approval key type mismatch') end
+local revision_type=redis.call('TYPE',KEYS[7]).ok
+local live_type=redis.call('TYPE',KEYS[8]).ok
+if enrollment_type~='string' or (node_type~='none' and node_type~='string') or (device_type~='none' and device_type~='string') or user_type~='string' or
+   (index_type~='none' and index_type~='zset') or (daily_type~='none' and daily_type~='string') or
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node approval key type mismatch') end
 local ok,current=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(current)~='table' or current['id']~=ARGV[1] or current['node_id']~=ARGV[2] or current['user_verifier']~=ARGV[3] then return -1 end
 if current['status']~='pending' then return 0 end
@@ -210,8 +214,15 @@ redis.call('SET',KEYS[1],ARGV[5],'EX',ARGV[7])
 redis.call('SET',KEYS[3],ARGV[8],'EX',ARGV[7])
 redis.call('DEL',KEYS[4])
 redis.call('ZADD',KEYS[5],0,ARGV[9])
+local revision=redis.call('INCR',KEYS[7])
+redis.call('XADD',KEYS[8],'MAXLEN',10000,'*','topic','nodes','resource_id',ARGV[2],'revision',tostring(revision),'action','invalidate')
+local now=redis.call('TIME')
+local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
+redis.call('XTRIM',KEYS[8],'MINID',cutoff)
+redis.call('EXPIRE',KEYS[8],86400)
 return 1`, []string{nodeEnrollmentPrefix + enrollmentID, nodeRecordKey(record.NodeID),
-		nodeEnrollmentDeviceKey + record.DeviceVerifier, indexKey, nodeOwnerIndexKey(accountID), dailyApprovalKey}, enrollmentID, record.NodeID, userVerifier,
+		nodeEnrollmentDeviceKey + record.DeviceVerifier, indexKey, nodeOwnerIndexKey(accountID), dailyApprovalKey,
+		nodeRevisionKey(record.NodeID), accountLiveKey(accountID)}, enrollmentID, record.NodeID, userVerifier,
 		string(nodeData), string(updated), now.Unix(), int64(nodeEnrollmentTTL.Seconds()), enrollmentID, member, int64(48*time.Hour/time.Second)).Int()
 	if err != nil {
 		return nodeRecord{}, err

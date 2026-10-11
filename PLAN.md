@@ -183,6 +183,7 @@ REST errors use `{error:{message:string,type:string,param:string|null,code:strin
 | `GET /api/nodes` / `GET /api/nodes/{id}` | Session, own nodes only | `Page<Node>` / `Node`; owner mismatch returns 404 |
 | `POST /api/nodes/link` | Session + CSRF; `{user_code,name}` | 201 `Node`; atomically approve exactly one pending enrollment |
 | `PATCH /api/nodes/{id}` | Session + CSRF; `{name}` | 200 `Node` |
+| `POST /api/nodes/{id}/models/{model_id}/prepare` | Session + CSRF; `{}`; model must be in the signed catalog | 200 ready/verified, 202 preparation or benchmark scheduled, 404 unknown owner/model, 503 capacity with `Retry-After`; never starts inference or accepts an artifact URL |
 | `POST /api/nodes/{id}/revoke` | Session + CSRF; `{}` | 204; revoke secret version/tokens, fence socket, fail active node attempts |
 | `POST /api/node/enrollments` | Public; `{hwid_hash:Hash,node_version,device_name}` | 201 `{enrollment_id,user_code,device_code,verification_uri,expires_at,poll_interval_seconds:5}`; codes expire in 10min; device code ≥256 random bits |
 | `POST /api/node/enrollments/token` | Device secret; `{device_code}` | 428 `enrollment_pending` until linked; 200 `{node_id,node_secret,server_origin}` after approval; same response may be re-read for 10min with same device secret, then wipe encrypted enrollment secret |
@@ -385,6 +386,8 @@ Prefix keys `cv:v1:`; one standalone primary supports cross-account scripts. Nev
 | `enrollment:<hashed-device-code>` / `enrollment-code:<user-code>` | Pending owner link, salted HWID, encrypted issued secret, expiry | 10min; tombstone 24h |
 | `node:<id>` / `account-nodes:<id>` | Hash owner, encrypted secret/version, HWID signal, public Node metadata; set IDs | Until deletion; retained payout references anonymized |
 | `node-session:<id>` | Current session/generation/gateway ID and last heartbeat | 45s refresh; durable node status separate |
+| `node-model-load-lock:<node>:<session>` / `node-benchmark-lock:<node>:<session>` | Session-wide model preparation and benchmark fencing tokens | 30s load lock renewed during preparation / 5min benchmark lock renewed during challenge; explicit release plus TTL recovery |
+| `node-model-preparation-permits` | Global sorted set of absent-model background preparation IDs with expiry scores | At most two cluster-wide; 13min expiry and stale-score pruning |
 | `node-auth-nonce:<hash>` / `node-auth-jti:<hash>` | One-use auth records | 60s / 5min |
 | `model:<slug>:<catalog-version>` / `catalog:active` | Signed immutable manifest JSON / pointer | Keep versions referenced by financial requests |
 | `model-nodes:<slug>` / `node-model:<node>:<slug>` | Candidate set / state hash with artifact and verified slots | Projection rebuildable; do not expire leased state |

@@ -100,6 +100,16 @@
     "valid": true
   },
   {
+    "file": "rest/node-model-preparation.json",
+    "schema": "openapi.yaml#/components/schemas/NodeModelPreparation",
+    "valid": true
+  },
+  {
+    "file": "rest/node-model-preparation-wrong-status.json",
+    "schema": "openapi.yaml#/components/schemas/NodeModelPreparation",
+    "valid": false
+  },
+  {
     "file": "rest/key-valid.json",
     "schema": "openapi.yaml#/components/schemas/ApiKey",
     "valid": true

@@ -50,6 +50,7 @@ func TestNodeEnrollmentApprovalAndSingleUseAccessTokens(t *testing.T) {
 		nodeEnrollmentUserKey + service.verifier("node-user-v1", created.UserCode),
 		service.nodeRateKey("enroll", source),
 		service.nodeRateKey("approve", ownerID.String()),
+		accountLiveKey(ownerID.String()),
 	}
 	t.Cleanup(func() {
 		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -69,7 +70,7 @@ func TestNodeEnrollmentApprovalAndSingleUseAccessTokens(t *testing.T) {
 	if err != nil || enrolled.ServerOrigin != service.origin {
 		t.Fatalf("poll approved enrollment=%+v err=%v", enrolled, err)
 	}
-	cleanupKeys = append(cleanupKeys, nodeRecordKey(enrolled.NodeID))
+	cleanupKeys = append(cleanupKeys, nodeRecordKey(enrolled.NodeID), nodeRevisionKey(enrolled.NodeID))
 	if len(enrolled.NodeSecret) != 64 {
 		t.Fatalf("node secret length=%d, want 64 hex characters", len(enrolled.NodeSecret))
 	}
@@ -254,7 +255,7 @@ func TestNodeHTTPRoutesAreOptInAndPendingPollUses428(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionID = strings.TrimPrefix(ownerCookie, "cv1_")
-	extraCleanup = append(extraCleanup, accountPrefix+ownerID, usernamePrefix+username, store.sessionKey(sessionID), "cv:v1:sessions:"+ownerID)
+	extraCleanup = append(extraCleanup, accountPrefix+ownerID, usernamePrefix+username, store.sessionKey(sessionID), "cv:v1:sessions:"+ownerID, accountLiveKey(ownerID))
 
 	badCSRF := httptest.NewRequest(http.MethodPost, "/api/node/enrollments/approve", strings.NewReader(`{"user_code":"`+created.UserCode+`"}`))
 	badCSRF.RemoteAddr = remote
@@ -293,7 +294,7 @@ func TestNodeHTTPRoutesAreOptInAndPendingPollUses428(t *testing.T) {
 	if err := json.Unmarshal(pollResponse.Body.Bytes(), &enrolled); err != nil || len(enrolled.NodeSecret) != 64 {
 		t.Fatalf("approved enrollment token=%+v err=%v", enrolled, err)
 	}
-	extraCleanup = append(extraCleanup, nodeRecordKey(enrolled.NodeID))
+	extraCleanup = append(extraCleanup, nodeRecordKey(enrolled.NodeID), nodeRevisionKey(enrolled.NodeID))
 
 	challenge := httptest.NewRequest(http.MethodPost, "/api/node/auth/challenge", strings.NewReader(`{"node_id":"00000000-0000-4000-8000-000000000001"}`))
 	challenge.RemoteAddr = remote

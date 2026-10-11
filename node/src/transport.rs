@@ -448,7 +448,7 @@ async fn run_session(
                                 let query: ModelRef = decode(&envelope)?;
                                 let state = match manager.verified_state(&query.model_id).await {
                                     Ok(state) if manager.catalog_version().await.as_deref() == Some(query.catalog_version.as_str()) => state,
-                                    _ => ModelStatePayload { model_id: query.model_id.clone(), state: "absent".into(), artifact_sha256: None, active_slots: 0, max_slots: 0, reason_code: Some("catalog_mismatch".into()) },
+                                    _ => ModelStatePayload { model_id: query.model_id.clone(), state: "absent".into(), artifact_sha256: None, active_slots: 0, max_slots: 0, reason_code: Some("catalog_mismatch".into()), available_disk_bytes: 0 },
                                 };
                                 outbound.send("model.state", state, Some(request_id), session.clone()).await?;
                             }
@@ -712,6 +712,10 @@ struct ActiveInference {
 struct HashMapActive(Arc<Mutex<std::collections::HashMap<String, ActiveInference>>>);
 
 impl HashMapActive {
+    async fn contains(&self, attempt: &str) -> bool {
+        self.0.lock().await.contains_key(attempt)
+    }
+
     async fn insert(&self, attempt: String, lease: String, token: CancellationToken) {
         self.insert_many(attempt, vec![lease], token).await;
     }
@@ -763,7 +767,11 @@ impl HashMapActive {
     async fn cancel(&self, attempt: &str, lease: &str, request_id: String) -> bool {
         let mut active = self.0.lock().await;
         if let Some(active_attempt) = active.get_mut(attempt) {
-            if active_attempt.leases.iter().any(|active_lease| active_lease == lease) {
+            if active_attempt
+                .leases
+                .iter()
+                .any(|active_lease| active_lease == lease)
+            {
                 active_attempt.cancel_request_id = Some(request_id);
                 active_attempt.cancellation.cancel();
                 return true;
@@ -1321,7 +1329,10 @@ async fn handle_benchmark(
         || start.leases.len() != start.required_concurrency as usize
         || start.input_token_ids.is_empty()
         || start.input_token_ids.len() > 8192
-        || start.input_token_ids.iter().any(|token| *token > i32::MAX as u32)
+        || start
+            .input_token_ids
+            .iter()
+            .any(|token| *token > i32::MAX as u32)
         || start.seed > i32::MAX as u32
     {
         return send_benchmark_error(
@@ -1415,7 +1426,11 @@ async fn handle_benchmark(
     if !active
         .insert_many_if_absent(
             active_key.clone(),
-            start.leases.iter().map(|lease| lease.lease_id.clone()).collect(),
+            start
+                .leases
+                .iter()
+                .map(|lease| lease.lease_id.clone())
+                .collect(),
             cancellation.clone(),
         )
         .await
@@ -1448,18 +1463,26 @@ async fn handle_benchmark(
             let seed = start.seed;
             let slot_deadline = deadline;
             slot_tasks.spawn(async move {
+                let slot_index = lease.slot_index;
+                let lease_id = lease.lease_id.clone();
+                let delta_lease_id = lease_id.clone();
                 let (delta_tx, mut delta_rx) = mpsc::channel::<crate::llama::Delta>(32);
                 let pump = tokio::spawn(async move {
                     while let Some(delta) = delta_rx.recv().await {
                         let payload = crate::protocol::BenchmarkDelta {
                             benchmark_id: benchmark_id.clone(),
-                            slot_index: lease.slot_index,
-                            lease_id: lease.lease_id.clone(),
+                            slot_index,
+                            lease_id: delta_lease_id.clone(),
                             chunk_index: delta.chunk_index,
                             text: delta.text,
                         };
                         if outbound
-                            .send("benchmark.delta", payload, Some(request_id.clone()), session.clone())
+                            .send(
+                                "benchmark.delta",
+                                payload,
+                                Some(request_id.clone()),
+                                session.clone(),
+                            )
                             .await
                             .is_err()
                         {
@@ -1478,7 +1501,7 @@ async fn handle_benchmark(
                     )
                     .await;
                 let _ = pump.await;
-                (lease.slot_index, lease.lease_id, generated)
+                (slot_index, lease_id, generated)
             });
         }
 
@@ -1645,9 +1668,16 @@ mod transport_tests {
             "a concurrent duplicate benchmark must not replace the original cancellation token"
         );
         assert_eq!(active.lease_ids().await, leases);
-        assert!(active.cancel(&benchmark, &leases[1], "cancel-request".to_owned()).await);
+        assert!(
+            active
+                .cancel(&benchmark, &leases[1], "cancel-request".to_owned())
+                .await
+        );
         assert!(cancellation.is_cancelled());
-        assert_eq!(active.cancel_request_id(&benchmark).await.as_deref(), Some("cancel-request"));
+        assert_eq!(
+            active.cancel_request_id(&benchmark).await.as_deref(),
+            Some("cancel-request")
+        );
 
         active.remove(&benchmark).await;
         assert!(active.lease_ids().await.is_empty());
@@ -1824,6 +1854,22 @@ mod transport_tests {
         let address = listener.local_addr().expect("server address");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept WebSocket client");
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                stream
+                    .read_exact(&mut byte)
+                    .await
+                    .expect("read WebSocket handshake request");
+                request.push(byte[0]);
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "handshake request exceeded limit"
+                );
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
             stream
                 .write_all(
                     b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
@@ -1836,7 +1882,16 @@ mod transport_tests {
         let result = open_socket(&Config::default(), target, "test-access-token").await;
         server.await.expect("WebSocket test server task");
 
-        assert!(matches!(result, Err(NodeError::AuthenticationRejected)));
+        let result_description = match &result {
+            Ok(_) => "handshake unexpectedly succeeded".to_owned(),
+            Err(NodeError::AuthenticationRejected) => "authentication rejected".to_owned(),
+            Err(NodeError::WebSocket(message)) => format!("WebSocket error: {message}"),
+            Err(_) => "unexpected non-WebSocket error".to_owned(),
+        };
+        assert!(
+            matches!(result, Err(NodeError::AuthenticationRejected)),
+            "handshake error was not classified as an authentication rejection: {result_description}"
+        );
     }
 
     #[tokio::test]

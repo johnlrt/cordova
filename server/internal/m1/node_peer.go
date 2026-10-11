@@ -37,22 +37,22 @@ type nodePeer struct {
 }
 
 type nodeExchange struct {
-	peer                 *nodePeer
-	requestID            string
-	events               chan nodeWireEnvelope
-	once                 sync.Once
-	kind                 string
-	modelID              string
-	commandID            string
-	operation            string
-	attemptID            string
-	leaseID              string
-	accepted             bool
-	nextChunk            uint32
-	benchmarkID          string
-	benchmarkLeases      map[uint32]string
-	nextBenchmarkChunk   map[uint32]uint32
-	terminal             bool
+	peer               *nodePeer
+	requestID          string
+	events             chan nodeWireEnvelope
+	once               sync.Once
+	kind               string
+	modelID            string
+	commandID          string
+	operation          string
+	attemptID          string
+	leaseID            string
+	accepted           bool
+	nextChunk          uint32
+	benchmarkID        string
+	benchmarkLeases    map[uint32]string
+	nextBenchmarkChunk map[uint32]uint32
+	terminal           bool
 }
 
 func newNodePeer(conn *websocket.Conn, identity nodeIdentity, sessionID string, nextSequence uint32) *nodePeer {
@@ -270,7 +270,7 @@ func (e *nodeExchange) accept(frame nodeWireEnvelope) bool {
 			return false
 		}
 		var payload nodeModelStatePayload
-		if decodeNodePayload(frame.Payload, &payload, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code") != nil || payload.ModelID != e.modelID {
+		if decodeNodePayload(frame.Payload, &payload, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code", "available_disk_bytes") != nil || payload.ModelID != e.modelID {
 			return false
 		}
 		e.terminal = true
@@ -441,7 +441,7 @@ func validateNodeReply(frame nodeWireEnvelope) error {
 	switch frame.Type {
 	case "model.state":
 		var payload nodeModelStatePayload
-		if decodeNodePayload(frame.Payload, &payload, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code") != nil || !validNodeModelState(payload) {
+		if decodeNodePayload(frame.Payload, &payload, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code", "available_disk_bytes") != nil || !validNodeModelState(payload) {
 			return errors.New("node model state response is invalid")
 		}
 	case "model.accepted":

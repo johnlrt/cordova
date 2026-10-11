@@ -91,3 +91,62 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 ### Обработка отказа node-auth — 2026-10-11
 
 Клиент завершает сессию после постоянного отказа авторизации (`401` на challenge, token или WebSocket handshake, а также WS close/error `unauthenticated`), а `408`, `429` и `5xx` оставляет для повторного подключения с backoff. GitHub Actions на Linux прошёл Rust format, workspace tests, clippy и dependency audit для коммита `8bd41d7`, включая HTTP-статусы, WebSocket 401 и close-frame `unauthenticated`. Реальный отзыв node-secret, проверка системного хранилища credentials и transport smoke на поддерживаемых ОС не выполнялись, поэтому B4 остаётся открытым.
+
+## C3 routing continuation — 2026-10-11
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| `go test -count=1 ./...` | Прошла на `go1.27.2 windows/amd64` | Redis integration tests пропущены без `CORDOVA_TEST_REDIS_URL`; race detector недоступен при `CGO_ENABLED=0`. |
+| `go vet ./...` | Прошла на `go1.27.2 windows/amd64` | Не проверяет Lua-скрипты Redis во время исполнения. |
+| `python scripts/contracts-check.py` | Прошла: 25 REST paths, 27 node WS types, 8 live WS types и 64 fixtures | Проверяет контракт и fixtures, не реальный C3 обмен с Rust-нодой. |
+| `make test-node-routing` | Не запускалась | На этом Windows-хосте нет `make` или локального Redis; WSL вернул `Wsl/ERROR_ACCESS_DENIED`. Новый общий Redis permit test скомпилирован, но пропущен из-за отсутствия `CORDOVA_TEST_REDIS_URL`. |
+
+Этот прогон подтвердил сборку и обычные Go-тесты для текущих изменений. B6 Redis concurrency, model-load lock, старые session completion и полный C3 WebSocket route gate остаются непроверенными.
+
+## Rust node Windows validation — 2026-10-11
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | Прошла на закреплённом Rust 1.96.0 | Только Windows checkout. |
+| `cargo clippy --locked --offline --workspace --all-targets -- -D warnings` | Прошла без предупреждений | Не проверяет другие target triples и native runner. |
+| `cargo test --locked --offline --workspace` | Прошли 20 library tests и 1 binary test | GGUF, llama.cpp и реальные узлы не запускались. |
+
+`process_id` и его получение ограничены Unix-конфигурацией, потому что поле используется только для Unix process-group cleanup; Windows продолжает завершать дочерний процесс через `Child::kill`. Redis-backed C6 permit/lock integration tests по-прежнему требуют отдельный Redis через `CORDOVA_TEST_REDIS_URL` и здесь не запускались.
+
+## Owner model preparation slice — 2026-10-11
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| `go test -count=1 ./...` | Все Go packages прошли на `go1.27.2 windows/amd64` | Redis integration cases пропустились без `CORDOVA_TEST_REDIS_URL`; поэтому owner/CSRF HTTP integration test и общий Redis preparation permit не исполнялись локально. |
+| `go vet ./...` | Прошла на `go1.27.2 windows/amd64` | Не исполняет Redis Lua scripts. |
+| `python scripts/contracts-check.py` | Прошла: 26 REST paths, 27 node WS types, 8 live WS types и 66 fixtures | Контрактная проверка не запускает gateway. |
+| `npm.cmd run contracts:check` / `npm.cmd run check` | Прошли; `svelte-check` сообщил 0 errors и 0 warnings | Статический frontend check. |
+| `npm.cmd test` | Прошли 28 unit tests | Model preparation server behavior покрыт отдельным Redis integration test, не исполнявшимся локально. |
+| Playwright `--grep "\\[nodes\\]"` | Прошли 5 node scenarios, включая owner-triggered preparation request and feedback | UI test stubs HTTP response; не подтверждает живую C3-ноду. |
+| `npm.cmd run build` | Production static build прошёл | Не является deployment/release proof. |
+
+`POST /api/nodes/{id}/models/{model_id}/prepare` проверяет session, CSRF и node ownership, принимает только model slug из подписанного каталога и передаёт подготовку общему C3 router. Для on-disk и absent моделей используется существующая session-fenced модельная блокировка; скачивания ограничены общим Redis permit и после загрузки требуют server-side benchmark. Loaded модель без свежего профиля запускает benchmark; с профилем возвращается `ready`. Команда не резервирует inference-запрос и не принимает путь, URL или хеш от браузера.
+
+Workflow gateway теперь поднимает изолированный Redis `7.4.2-alpine3.21` с AOF/`appendfsync always`, задаёт `CORDOVA_TEST_REDIS_URL`, запускает полный Go race suite и `make test-node-routing`. Этот workflow-конфиг ещё не исполнен hosted GitHub Actions. Реальная C3-нода, подписанный production catalog, квалифицированный GGUF, tokenizer parity и remote-session routing races остаются непроверенными.
+
+## Проверка C4 live node invalidations — 2026-10-11
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| `python scripts/contracts-check.py` | Прошла: 26 REST paths, 27 node WS types, 8 live WS types и 66 fixtures | Проверяет контракты и fixtures, не Redis publication. |
+| `npm.cmd run check` | Прошла: 0 ошибок, 0 предупреждений | Svelte/type diagnostics. |
+| `npm.cmd test` | Прошли 28 unit tests | Не исполняет живой account WebSocket. |
+| `npm.cmd run test:browser` | Все 10 сценариев прошли: 5 auth/live и 5 node | Используются локальный Vite и HTTP stubs; live Redis/C3 path этим не подтверждён. |
+| `npm.cmd run build` | Production static build прошёл | Запущен с повышенным доступом после sandbox `EPERM` при чтении `node_modules`. |
+| Go `fmt`, `test`, `vet` | Прошли на `go1.27.2 windows/amd64`; после sandbox-отказа на loopback suite повторён с разрешёнными локальными тестовыми сокетами | Redis-backed cases без `CORDOVA_TEST_REDIS_URL` пропущены; новая проверка session/heartbeat/model-state invalidations требует отдельного Redis/CI execution. |
+
+C4 теперь пропускает подписанные `nodes` invalidations и публикует account-scoped metadata events при node approval, rename, revoke, session start/close, heartbeat и model-state changes. UI refetch-ит owner REST snapshot, объединяет частые invalidations и опрашивает REST раз в 30 секунд для статуса, который меняется после heartbeat TTL. Живой Redis/WebSocket delivery и hosted CI для этой ревизии остаются непроверенными.
+
+## C6 rank formula core — 2026-10-11
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| `go test -count=1 ./internal/ranker` | Прошли формульные, provisional, quarantine, clamp и invalid-window cases | Проверено на `go1.27.2 windows/amd64`; `-race` target требует Linux CI или включённый cgo. |
+| `go test ./...` и `go vet ./...` | Прошли | Redis/Kafka интеграция ranker ещё отсутствует и этим прогоном не проверялась. |
+
+`server/internal/ranker` реализует `c6-v1`: точные рациональные вклады C/T/U/L/S с единственным округлением вниз, rank 10 до свежего benchmark и десяти outcomes, rank 0 для quarantine. `make test-rank-fraud` добавлен как целевой тест. Kafka node-event ingestion, 24-часовая Redis projection, rank-change outbox и fraud/canary controls остаются незакрытыми требованиями B8.

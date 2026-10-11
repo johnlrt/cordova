@@ -3,6 +3,7 @@
   import { ApiFailure } from '$lib/api/client.ts';
   import { fetchNodes, linkNode } from '$lib/api/account.ts';
   import type { Node } from '$lib/api/generated/contracts.ts';
+  import { startNodeLive } from '$lib/live/nodes.ts';
   import { language } from '$lib/state/language.svelte.ts';
   import { session } from '$lib/state/session.svelte.ts';
 
@@ -11,6 +12,7 @@
   let request: AbortController | undefined;
   let listRequest: AbortController | undefined;
   let removeSessionCleanup = () => {};
+  let stopNodeLive = () => {};
   let nodes = $state<Node[]>([]);
   let nextCursor = $state<string | null>(null);
   let loadingMore = $state(false);
@@ -33,6 +35,8 @@
 
   function clearTransientState() {
     active = false;
+    stopNodeLive();
+    stopNodeLive = () => {};
     request?.abort();
     listRequest?.abort();
     request = undefined;
@@ -57,9 +61,12 @@
       generation = session.generation;
       removeSessionCleanup = session.addLiveCleanup(clearTransientState);
       void refreshNodes();
+      stopNodeLive = startNodeLive(() => void refreshNodes());
     });
     return () => {
       removeSessionCleanup();
+      stopNodeLive();
+      stopNodeLive = () => {};
       clearTransientState();
     };
   });

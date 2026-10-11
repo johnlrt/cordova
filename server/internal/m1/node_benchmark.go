@@ -19,7 +19,7 @@ type nodeBenchmarkStartPayload struct {
 	InputTokenIDs       []uint32             `json:"input_token_ids"`
 	MaxTokens           uint32               `json:"max_tokens"`
 	Seed                uint32               `json:"seed"`
-	RequiredConcurrency uint32              `json:"required_concurrency"`
+	RequiredConcurrency uint32               `json:"required_concurrency"`
 	Leases              []nodeBenchmarkLease `json:"leases"`
 	DeadlineAt          string               `json:"deadline_at"`
 }
@@ -40,10 +40,10 @@ type nodeBenchmarkSlotResult struct {
 }
 
 type nodeBenchmarkResultPayload struct {
-	BenchmarkID           string                     `json:"benchmark_id"`
-	Slots                []nodeBenchmarkSlotResult `json:"slots"`
-	ReportedPeakVRAMBytes uint64                      `json:"reported_peak_vram_bytes"`
-	CompletedSlots        uint32                     `json:"completed_slots"`
+	BenchmarkID           string                    `json:"benchmark_id"`
+	Slots                 []nodeBenchmarkSlotResult `json:"slots"`
+	ReportedPeakVRAMBytes uint64                    `json:"reported_peak_vram_bytes"`
+	CompletedSlots        uint32                    `json:"completed_slots"`
 }
 
 func validBenchmarkTokenIDs(tokens []uint32) bool {

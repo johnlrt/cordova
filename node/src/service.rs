@@ -1,4 +1,7 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::{env, process::Command};
 
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +77,7 @@ pub fn install_user_service() -> Result<()> {
         println!(
             "Автозапуск для Windows пока не настроен; запустите cordova-node run --foreground."
         );
-        Ok(())
+        return Ok(());
     }
     #[allow(unreachable_code)]
     Ok(())
@@ -223,7 +226,7 @@ pub fn config_directory() -> PathBuf {
     config_dir()
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 

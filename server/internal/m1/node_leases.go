@@ -9,8 +9,6 @@ import (
 
 	"cordova/server/internal/domain"
 	"cordova/server/internal/request"
-
-	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -136,10 +134,45 @@ func nodeModelLoadLockKey(nodeID, sessionID, _ string) string {
 	return "cv:v1:node-model-load-lock:" + nodeID + ":" + sessionID
 }
 
+func nodeModelPreparationPermitKey() string { return "cv:v1:node-model-preparation-permits" }
+
+func (s *nodeService) acquireNodeModelPreparationPermit(ctx context.Context, permitID string) error {
+	if ctx == nil || !validID(permitID) {
+		return ErrInvalid
+	}
+	ttlMS := int64((nodeModelPrepareTimeout + time.Minute) / time.Millisecond)
+	result, err := s.redis.Eval(ctx, acquireNodeModelPreparationPermitScript,
+		[]string{nodeModelPreparationPermitKey()}, permitID, maxAbsentNodePreparations, ttlMS).Int()
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return ErrNodePreparationActive
+	}
+	return nil
+}
+
+func (s *nodeService) releaseNodeModelPreparationPermit(ctx context.Context, permitID string) error {
+	if ctx == nil || ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), nodeAttemptCleanupTimeout)
+		defer cancel()
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, nodeAttemptCleanupTimeout)
+		defer cancel()
+	}
+	_, err := s.redis.Eval(ctx, releaseNodeModelPreparationPermitScript,
+		[]string{nodeModelPreparationPermitKey()}, permitID).Int()
+	return err
+}
+
 func (s *nodeService) acquireNodeModelLoadLock(ctx context.Context, nodeID, modelID, catalogVersion,
-	artifactSHA256, lockID string) (string, uint64, error) {
+	artifactSHA256, expectedState string, requiredDiskBytes uint64, lockID string) (string, uint64, error) {
 	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) ||
-		!validNodeHash(artifactSHA256) || !validID(lockID) {
+		!validNodeHash(artifactSHA256) || !validID(lockID) ||
+		(expectedState != "on_disk" && expectedState != "absent") || requiredDiskBytes > (1<<53)-1 ||
+		(expectedState == "on_disk" && requiredDiskBytes != 0) || (expectedState == "absent" && requiredDiskBytes == 0) {
 		return "", 0, ErrInvalid
 	}
 	s.peerMu.RLock()
@@ -158,7 +191,8 @@ func (s *nodeService) acquireNodeModelLoadLock(ctx context.Context, nodeID, mode
 		nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID), nodeModelLoadLockKey(nodeID, sessionID, modelID),
 		nodeBenchmarkLockKey(nodeID, sessionID, modelID),
 	}, sessionID, strconv.FormatUint(identity.Generation, 10), nodeID, identity.OwnerID,
-		identity.SecretVersion, modelID, catalogVersion, artifactSHA256, lockID, 30_000).Int()
+		identity.SecretVersion, modelID, catalogVersion, artifactSHA256, lockID, expectedState,
+		strconv.FormatUint(requiredDiskBytes, 10), 30_000).Int()
 	if err != nil {
 		return "", 0, err
 	}
@@ -174,7 +208,7 @@ func (s *nodeService) acquireNodeModelLoadLock(ctx context.Context, nodeID, mode
 	}
 }
 
-func (s *nodeService) releaseNodeModelLoadLock(ctx context.Context, nodeID, sessionID, modelID, lockID string) {
+func (s *nodeService) releaseNodeModelLoadLock(ctx context.Context, nodeID, sessionID, modelID, lockID string) error {
 	if ctx == nil || ctx.Err() != nil {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(context.Background(), nodeAttemptCleanupTimeout)
@@ -184,9 +218,29 @@ func (s *nodeService) releaseNodeModelLoadLock(ctx context.Context, nodeID, sess
 		ctx, cancel = context.WithTimeout(ctx, nodeAttemptCleanupTimeout)
 		defer cancel()
 	}
-	_, _ = s.redis.Eval(ctx, releaseNodeModelLoadLockScript, []string{
+	result, err := s.redis.Eval(ctx, releaseNodeModelLoadLockScript, []string{
 		nodeModelLoadLockKey(nodeID, sessionID, modelID),
 	}, lockID).Int()
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return ErrNodeConflict
+	}
+	return nil
+}
+
+func (s *nodeService) renewNodeModelLoadLock(ctx context.Context, nodeID, sessionID, modelID, lockID string) error {
+	result, err := s.redis.Eval(ctx, renewNodeModelLoadLockScript, []string{
+		nodeModelLoadLockKey(nodeID, sessionID, modelID),
+	}, lockID, 30_000).Int()
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return ErrNodeConflict
+	}
+	return nil
 }
 
 func (s *nodeService) acquireNodeBenchmarkLock(ctx context.Context, nodeID, modelID, catalogVersion,
@@ -514,8 +568,10 @@ local state_ok,state=pcall(cjson.decode,redis.call('GET',KEYS[4]))
 if not node_ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or
    node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false or
    not state_ok or type(state)~='table' or state['node_id']~=ARGV[3] or state['session_id']~=ARGV[1] or
-   type(state['model'])~='table' or state['model']['model_id']~=ARGV[6] or state['model']['state']~='on_disk' or
-   state['model']['artifact_sha256']~=ARGV[8] then return 0 end
+   type(state['model'])~='table' or state['model']['model_id']~=ARGV[6] or state['model']['state']~=ARGV[10] then return 0 end
+if ARGV[10]=='on_disk' and state['model']['artifact_sha256']~=ARGV[8] then return 0 end
+if ARGV[10]=='absent' and (state['model']['artifact_sha256']~=cjson.null or state['model']['reason_code']~=cjson.null or
+   tonumber(state['model']['available_disk_bytes'] or '0')<tonumber(ARGV[11])) then return 0 end
 if load_lock_type=='string' or benchmark_lock_type=='string' then return -2 end
 local clock=redis.call('TIME')
 local now_ms=tonumber(clock[1])*1000+math.floor(tonumber(clock[2])/1000)
@@ -535,11 +591,47 @@ for i=1,#members,2 do
     if record['node_id']==ARGV[3] and record['session_id']==ARGV[1] and record['generation']==ARGV[2] then return -2 end
   end
 end
-local ttl=tonumber(ARGV[10])
+local ttl=tonumber(ARGV[12])
 if ttl<1000 or ttl>30000 then return 0 end
 for _,lease_id in ipairs(expired) do redis.call('ZREM',KEYS[5],lease_id); redis.call('HDEL',KEYS[6],lease_id) end
 redis.call('SET',KEYS[7],ARGV[9],'PX',ttl)
 return 1`
+
+const acquireNodeModelPreparationPermitScript = `
+local permits_type=redis.call('TYPE',KEYS[1]).ok
+if permits_type~='none' and permits_type~='zset' then return redis.error_reply('node model preparation permit key type mismatch') end
+local clock=redis.call('TIME')
+local now_ms=tonumber(clock[1])*1000+math.floor(tonumber(clock[2])/1000)
+redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',now_ms)
+local limit=tonumber(ARGV[2])
+local ttl=tonumber(ARGV[3])
+if limit<1 or limit>2 or ttl<60000 or ttl>900000 then return 0 end
+if redis.call('ZCARD',KEYS[1])>=limit then return 0 end
+redis.call('ZADD',KEYS[1],now_ms+ttl,ARGV[1])
+redis.call('PEXPIRE',KEYS[1],ttl)
+return 1`
+
+const releaseNodeModelPreparationPermitScript = `
+local permits_type=redis.call('TYPE',KEYS[1]).ok
+if permits_type=='none' then return 1 end
+if permits_type~='zset' then return redis.error_reply('node model preparation permit key type mismatch') end
+redis.call('ZREM',KEYS[1],ARGV[1])
+return 1`
+
+const renewNodeModelLoadLockScript = `
+if redis.call('TYPE',KEYS[1]).ok~='string' then return 0 end
+if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end
+local ttl=tonumber(ARGV[2])
+if ttl<1000 or ttl>30000 then return 0 end
+redis.call('PEXPIRE',KEYS[1],ttl)
+return 1`
+
+const releaseNodeModelLoadLockScript = `
+local kind=redis.call('TYPE',KEYS[1]).ok
+if kind=='none' then return 0 end
+if kind~='string' then return redis.error_reply('node model load lock key type mismatch') end
+if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) end
+return 0`
 
 const acquireNodeBenchmarkLockScript = `
 local session_type=redis.call('TYPE',KEYS[1]).ok

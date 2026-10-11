@@ -1,7 +1,7 @@
 # Cordova — backend and Rust node agent plan
 
 **Goal:** Implement the Go control plane and Rust inference node with independently verified usage, atomic accounting and conservative XMR operations.
-**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Owner:** backend agent. **Status:** implementation queue; application code does not yet exist.
+**Date:** 2026-10-08 (Asia/Baku). **Version:** v1. **Owner:** backend agent. **Status:** Go gateway, C3 enrollment/session protocol, signed-catalog routing, Redis-backed request accounting, tokenizer helper and Rust node transport are implemented in partial slices. B0 external qualification and M2/B3–B6 model, privacy, platform and routing gates remain open; see [docs/stage-2.md](docs/stage-2.md), [docs/stage-3.md](docs/stage-3.md) and [docs/verification.md](docs/verification.md) for current evidence.
 
 Apply planiuer Core (services and phases), Security (untrusted nodes/custody), Quality (Go/Rust boundaries), and First-Run (external contracts and crash tests). Skip none. Read [PLAN.md](PLAN.md) first. It exclusively owns shared types, endpoints, WS schemas, model catalog, token accounting, ledger/routing/rank rules and financial defaults. This plan owns packages, node crates and implementation/verification tasks; consume shared contracts instead of redefining them.
 
@@ -245,6 +245,9 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - v6, 2026-10-11: Cover the SOCKS5 username/password handshake with synthetic credentials; the OS credential-store and end-to-end transport gates remain open.
 - v7, 2026-10-11: Stop retrying node authentication after permanent rejection at challenge/token, WebSocket handshake, or immediate unauthorized session close; preserve backoff for rate limits and server failures. CI and fault evidence remain pending.
 - v8, 2026-10-11: Add direct WebSocket handshake/close rejection tests and make the transport test target execute the locked node workspace. Linux CI passes; OS credential-store, reconnect-fault and cross-platform smoke gates remain open.
+- v9, 2026-10-11: Add C6 tier-3 on-disk load-then-claim within the 10-second node command deadline, plus absent-model background download-and-load with fresh disk eligibility, session/state rechecks, a Redis permit limiting downloads to two across gateway instances, renewed node fencing, and post-preparation benchmark scheduling. B6 integration, retry, stale-session and capacity acceptance gates remain open.
+- v10, 2026-10-11: Add owner-authorized signed-catalog model preparation through the C3 router and exercise its ownership/CSRF handler with the Redis integration suite. CI now runs Go Redis integration tests against an isolated AOF-enabled Redis; the current local Windows run could not execute those integration cases without Redis.
+- v11, 2026-10-11: Publish account-scoped C4 node invalidations for owner lifecycle mutations, node session start/close, heartbeats and model-state changes, and pass node events through the live gateway. A Redis-backed integration assertion is added; the current shell has no Go or Redis runtime, so the assertion and hosted CI still need execution.
 
 ## Open risks
 

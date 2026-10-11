@@ -19,8 +19,29 @@ jobs:
       - name: Format
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - name: Start isolated Redis for integration tests
+        run: |
+          docker run --detach --rm --name cordova-ci-redis --publish 127.0.0.1:6379:6379 \
+            redis:7.4.2-alpine3.21 redis-server --appendonly yes --appendfsync always --save ""
+          for attempt in $(seq 1 30); do
+            if docker exec cordova-ci-redis redis-cli ping >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          docker logs cordova-ci-redis
+          exit 1
+      - name: Go tests, including Redis integration
+        env:
+          CORDOVA_TEST_REDIS_URL: redis://127.0.0.1:6379/14
+        run: go test -race -count=1 ./...
+      - name: C3 routing and model preparation integration
+        working-directory: .
+        env:
+          CORDOVA_TEST_REDIS_URL: redis://127.0.0.1:6379/14
+        run: make test-node-routing
       - run: go build ./cmd/gateway ./cmd/mock-node
+      - name: Stop integration Redis
+        if: always()
+        run: docker stop cordova-ci-redis 2>/dev/null || true
       - name: Dependency vulnerability check
         shell: bash
         run: |

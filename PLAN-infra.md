@@ -1,7 +1,7 @@
 # Cordova — infrastructure and release agent plan
 
 **Goal:** Make Cordova reproducibly deployable and recoverable with private data services, isolated Monero custody and verified portable node releases.
-**Date:** 2026-10-09 (Asia/Baku). **Version:** v2. **Owner:** infrastructure agent. **Status:** Stage 1 has a Go-only GitHub Actions workflow; Stage 2 has contract schemas and a checker, but CI does not run that checker yet. Compose and deployment manifests do not exist.
+**Date:** 2026-10-09 (Asia/Baku). **Version:** v3. **Owner:** infrastructure agent. **Status:** versioned local Compose services, nginx edge/config validation, contract checks, GitHub Actions for Go/Rust/frontend and a Compose-backed M1 browser job exist. The Go CI job now starts an isolated AOF-enabled Redis and runs Redis integration tests. Production image digests/signatures, replica fsync, off-host restore, stagenet operations and signed portable node releases remain open gates.
 
 Apply planiuer Core (deployment dependencies), Security (network/secrets/custody), Quality (repeatable configuration), and First-Run (clean-stack/restore/release proof). Skip none. Read [PLAN.md](PLAN.md) first; it exclusively owns shared contracts, financial policy, transport/auth rules, persistence requirements, threats, defaults and milestone gates. This file owns deployment manifests, CI/CD, operations, backups and release plumbing. Do not reproduce endpoint/message/ledger schemas here.
 
@@ -291,7 +291,7 @@ On a failed deployment, preserve service/ledger/wallet state, close affected cir
 
 ## Next actions
 
-- **IN0 (Stage 2 / I0):** Run the existing contract checker in the pull-request workflow. **Done when:** contract/schema/fixture violations fail CI and the workflow remains independent of Docker and external services.
+- **IN0 (Stage 2 / I0, implemented):** Run the contract checker in the pull-request workflow. A separate Go gateway job uses an isolated versioned Redis container for Redis integration tests; the schema-only contract job remains independent of Docker and external services. **Still needs:** a successful hosted CI run for the current workflow revision.
 - **IN1 (I0b):** Pin versions/digests and implement configuration validation. **Done when:** clean-clone `make config-check` rejects absent production secrets and invalid network/model combinations.
 - **IN2 (I1/I2):** Bring up private Compose and nginx with mock-node SSE. **Done when:** `make smoke && make network-check && make test-edge` passes.
 - **IN3 (I3):** Configure persistence/replica and consistent encrypted remote backups. **Done when:** a scratch restore passes `make restore-drill` and records measured RPO/RTO.
@@ -301,6 +301,7 @@ On a failed deployment, preserve service/ledger/wallet state, close affected cir
 
 - v1, 2026-10-08: Define infrastructure topology, deployment/release ownership and I0–I7 gates.
 - v2, 2026-10-09: Add the Stage 2 contract-CI gate; distinguish it from unverified M0 integrations and the later Compose/deployment slices.
+- v3, 2026-10-11: Reflect the existing Compose/M1 CI stack, wire Redis-backed Go integration tests into CI using the Compose-pinned Redis version, and retain the production qualification gates as open.
 
 ## Open risks
 

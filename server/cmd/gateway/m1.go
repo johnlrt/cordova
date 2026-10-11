@@ -203,7 +203,7 @@ func runM1(address string) error {
 	if err := store.ReconcileAccountedUsage(startupCtx, ledger); err != nil {
 		return errors.New("M3 usage projection recovery did not complete; gateway remains unavailable")
 	}
-	handler, err := m1.NewHandlerWithLedgerAndExecutor(config, store, executor, ledger, func(ctx context.Context) error {
+	readiness := func(ctx context.Context) error {
 		if err := rdb.Ping(ctx).Err(); err != nil {
 			return errors.New("Redis is unavailable")
 		}
@@ -217,7 +217,13 @@ func runM1(address string) error {
 			return errors.New("financial ledger recovery is incomplete")
 		}
 		return pingInference(ctx)
-	})
+	}
+	var handler http.Handler
+	if modelPreparer, ok := router.(m1.NodeModelPreparer); ok {
+		handler, err = m1.NewHandlerWithLedgerAndExecutorAndNodeModelPreparer(config, store, executor, ledger, modelPreparer, readiness)
+	} else {
+		handler, err = m1.NewHandlerWithLedgerAndExecutor(config, store, executor, ledger, readiness)
+	}
 	if err != nil {
 		return err
 	}

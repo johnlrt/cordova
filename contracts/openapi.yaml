@@ -1328,6 +1328,119 @@
         }
       }
     },
+    "/api/nodes/{id}/models/{model_id}/prepare": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Id"
+          }
+        },
+        {
+          "name": "model_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "maxLength": 128
+          }
+        }
+      ],
+      "post": {
+        "operationId": "prepareOwnedNodeModel",
+        "summary": "Prepare a signed catalog model on an owned node",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 32
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The model is loaded and has a current verified capacity profile.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeModelPreparation"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Model preparation or capacity benchmarking was scheduled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeModelPreparation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "The owned node or signed-catalog model was not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The node is offline, busy, or lacks resources to prepare the model.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/nodes/{id}/revoke": {
       "parameters": [
         {
@@ -3509,6 +3622,29 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 64
+          }
+        },
+        "additionalProperties": false
+      },
+      "NodeModelPreparation": {
+        "type": "object",
+        "required": [
+          "model_id",
+          "status"
+        ],
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "preparing",
+              "benchmarking"
+            ]
           }
         },
         "additionalProperties": false

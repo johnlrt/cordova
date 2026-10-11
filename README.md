@@ -88,7 +88,7 @@ Set-Location ..
 
 ## Rust-нода и следующий этап
 
-В [инструкции Rust-ноды](docs/node-setup.md) описаны CLI и настройка llama.cpp. В M1 gateway использует отдельную синтетическую WSS mock-ноду; Rust CLI и runner пока не подключены к enrollment, маршрутизации и настоящему inference. Контракты backend и C2-параметры запроса описаны в [M1 implementation notes](docs/stage-2.md).
+В [инструкции Rust-ноды](docs/node-setup.md) описаны CLI и настройка llama.cpp. По умолчанию gateway использует синтетическую WSS mock-ноду. Опциональный C3-путь уже включает enrollment, Rust WebSocket transport, подписанный каталог, tokenizer helper и session-fenced routing/model preparation. Для него нужны `CORDOVA_INFERENCE_MODE=c3`, узлы с одобренными C3 credentials и настроенный подписанный каталог/tokenizer. Настоящая модель пока не допущена: отсутствуют квалифицированные GGUF и подтверждённый helper/node token parity, а Linux/Windows/macOS hardware и M2 release gates не пройдены. Текущие границы описаны в [M1 implementation notes](docs/stage-2.md) и [verification log](docs/verification.md).
 
 ## Другу, который продолжит работу
 
@@ -97,6 +97,6 @@ Set-Location ..
 3. Выполнить `cd server`, `go test ./...`, `go vet ./...`.
 4. Делать изменения в своей ветке и присылать Pull Request.
 
-Следующий этап — подключить Rust-ноду по C3 handshake и передавать задания в llama.cpp после выполнения проверок модели, лицензии, памяти, шаблона и токенизации. Пилот по-прежнему ограничен одним одновременным запросом. Intel graphics/NPU на Ultra пока не проверены и не считаются используемым ускорителем.
+Следующий этап — пройти реальные model/tokenizer parity, Redis-backed C3 routing, reconnect-fencing и supported-OS smoke gates до включения настоящего inference. Пилот по-прежнему ограничен одним одновременным запросом. Intel graphics/NPU на Ultra пока не проверены и не считаются используемым ускорителем.
 
 Полный замысел: [общая архитектура](PLAN.md), [backend/Rust](PLAN-back.md), [frontend](PLAN-front.md), [инфраструктура](PLAN-infra.md). Эти планы описывают дальнейшую работу, а не уже готовые возможности.

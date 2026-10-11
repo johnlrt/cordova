@@ -36,6 +36,7 @@ pub struct ModelStatePayload {
     pub active_slots: u32,
     pub max_slots: u32,
     pub reason_code: Option<String>,
+    pub available_disk_bytes: u64,
 }
 
 pub struct ModelManager {
@@ -101,6 +102,8 @@ impl ModelManager {
             .get(model_id)
             .cloned()
             .ok_or_else(|| NodeError::Catalog("model is not in the signed catalog".into()))?;
+        let root = prepare_model_dir(&self.config.model_dir).await?;
+        let available_disk_bytes = available_space(&root).unwrap_or(0).min((1u64 << 53) - 1);
         let runners = self.runners.lock().await;
         if let Some(runner) = runners.get(model_id) {
             if runner.is_running().await {
@@ -111,11 +114,12 @@ impl ModelManager {
                     active_slots: runner.active_slots().await,
                     max_slots: runner.max_slots(),
                     reason_code: None,
+                    available_disk_bytes,
                 });
             }
         }
         drop(runners);
-        let path = manifest.artifact_path(&self.config.model_dir);
+        let path = manifest.artifact_path(&root);
         if regular_file(&path)? {
             Ok(ModelStatePayload {
                 model_id: model_id.to_owned(),
@@ -124,15 +128,23 @@ impl ModelManager {
                 active_slots: 0,
                 max_slots: 0,
                 reason_code: None,
+                available_disk_bytes,
             })
         } else {
+            let max_cache_bytes = self
+                .config
+                .max_disk_gib
+                .checked_mul(1024 * 1024 * 1024)
+                .unwrap_or(0);
             Ok(ModelStatePayload {
                 model_id: model_id.to_owned(),
                 state: "absent".into(),
                 artifact_sha256: None,
                 active_slots: 0,
                 max_slots: 0,
-                reason_code: None,
+                reason_code: (manifest.artifact_size_bytes > max_cache_bytes)
+                    .then(|| "disk_full".to_owned()),
+                available_disk_bytes,
             })
         }
     }
@@ -160,6 +172,7 @@ impl ModelManager {
                 active_slots: 0,
                 max_slots: 0,
                 reason_code: Some("catalog_mismatch".into()),
+                available_disk_bytes: state.available_disk_bytes,
             })
         }
     }

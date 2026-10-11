@@ -207,7 +207,7 @@ func (h *Handler) runLiveConnection(parent context.Context, conn *websocket.Conn
 				return
 			}
 		case <-poll.C:
-			if topics == nil || !topics["usage"] {
+			if topics == nil {
 				continue
 			}
 			events, next, err := h.store.LiveEvents(ctx, accountID, cursor)
@@ -227,7 +227,7 @@ func (h *Handler) runLiveConnection(parent context.Context, conn *websocket.Conn
 			}
 			cursor = next
 			for _, event := range events {
-				if event.Topic != "usage" || event.Action != "invalidate" || !validUUID(event.ResourceID) || event.Revision < 1 || !validStreamID(event.EventID) {
+				if (event.Topic != "nodes" && event.Topic != "usage" && event.Topic != "billing") || event.Action != "invalidate" || !validUUID(event.ResourceID) || event.Revision < 1 || !validStreamID(event.EventID) {
 					closeLive(conn, websocket.CloseInternalServerErr, "unavailable")
 					return
 				}

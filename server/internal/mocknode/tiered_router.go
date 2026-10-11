@@ -59,11 +59,6 @@ type TieredNode struct {
 	Provider *Provider
 }
 
-type RemoteModelStatus struct {
-	State          ModelResidency
-	ArtifactSHA256 string
-}
-
 // RemoteModelStatus and ModelController are shared with the production C3 adapter.
 type RemoteModelStatus = inference.RemoteModelStatus
 type ModelController = inference.ModelController

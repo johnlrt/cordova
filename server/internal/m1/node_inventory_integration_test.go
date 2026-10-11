@@ -18,6 +18,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type nodeModelPreparerFunc func(context.Context, string, string) (NodeModelPreparationStatus, error)
+
+func (prepare nodeModelPreparerFunc) PrepareNodeModel(ctx context.Context, nodeID, modelID string) (NodeModelPreparationStatus, error) {
+	return prepare(ctx, nodeID, modelID)
+}
+
 func TestNodeInventoryOwnershipPaginationRenameAndRevoke(t *testing.T) {
 	client := idempotencyTestRedis(t)
 	_, signingKey, err := ed25519.GenerateKey(rand.Reader)
@@ -34,7 +40,13 @@ func TestNodeInventoryOwnershipPaginationRenameAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandler(config, store, inference.Mock{})
+	var preparedNodeID, preparedModelID string
+	var prepareErr error
+	handler, err := newHandler(config, store, inference.Mock{}, nil, nil, nodeModelPreparerFunc(
+		func(_ context.Context, nodeID, modelID string) (NodeModelPreparationStatus, error) {
+			preparedNodeID, preparedModelID = nodeID, modelID
+			return NodeModelPreparationScheduled, prepareErr
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +78,7 @@ func TestNodeInventoryOwnershipPaginationRenameAndRevoke(t *testing.T) {
 		return cookie, csrf
 	}
 	ownerCookie, ownerCSRF := createOwner(ownerID.String())
-	otherCookie, _ := createOwner(otherID.String())
+	otherCookie, otherCSRF := createOwner(otherID.String())
 	remote := fmt.Sprintf("198.51.100.%d:1234", time.Now().UnixNano()%200+1)
 	source, _, err := net.SplitHostPort(remote)
 	if err != nil {
@@ -83,6 +95,7 @@ func TestNodeInventoryOwnershipPaginationRenameAndRevoke(t *testing.T) {
 			"cv:v1:sessions:" + ownerID.String(), "cv:v1:sessions:" + otherID.String(),
 			nodeOwnerIndexKey(ownerID.String()), nodeOwnerIndexReadyKey(ownerID.String()),
 			nodeOwnerIndexKey(otherID.String()), nodeOwnerIndexReadyKey(otherID.String()),
+			accountLiveKey(ownerID.String()), accountLiveKey(otherID.String()),
 			service.nodeRateKey("enroll", source), service.nodeRateKey("approve", ownerID.String())}
 		for _, enrollment := range enrollments {
 			keys = append(keys, nodeEnrollmentPrefix+enrollment.EnrollmentID,
@@ -91,7 +104,7 @@ func TestNodeInventoryOwnershipPaginationRenameAndRevoke(t *testing.T) {
 		}
 		for _, record := range records {
 			member, _ := nodeIndexMember(record)
-			keys = append(keys, nodeRecordKey(record.ID), nodeSessionKey(record.ID), nodeHeartbeatKey(record.ID),
+			keys = append(keys, nodeRecordKey(record.ID), nodeSessionKey(record.ID), nodeHeartbeatKey(record.ID), nodeRevisionKey(record.ID),
 				nodeGenerationKey(record.ID), nodeRateKeyForCleanup(service, ownerID.String(), record.ID))
 			_ = member
 		}
@@ -168,6 +181,29 @@ func TestNodeInventoryOwnershipPaginationRenameAndRevoke(t *testing.T) {
 	second := link(newEnrollment("device-two"), "workstation two")
 	if first.ID == second.ID {
 		t.Fatal("two enrollment codes produced the same node")
+	}
+	preparePath := "/api/nodes/" + first.ID + "/models/cordova-chat-small-v1/prepare"
+	if response := request(http.MethodPost, preparePath, "{}", "", ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated model preparation status=%d", response.Code)
+	}
+	if response := request(http.MethodPost, preparePath, "{}", ownerCookie, strings.Repeat("x", 32)); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong-CSRF model preparation status=%d", response.Code)
+	}
+	if response := request(http.MethodPost, preparePath, "{}", otherCookie, otherCSRF); response.Code != http.StatusNotFound {
+		t.Fatalf("cross-account model preparation status=%d", response.Code)
+	}
+	prepared := request(http.MethodPost, preparePath, "{}", ownerCookie, ownerCSRF)
+	var preparation nodeModelPreparationResponse
+	if prepared.Code != http.StatusAccepted || json.Unmarshal(prepared.Body.Bytes(), &preparation) != nil ||
+		preparation.ModelID != "cordova-chat-small-v1" || preparation.Status != NodeModelPreparationScheduled ||
+		preparedNodeID != first.ID || preparedModelID != "cordova-chat-small-v1" {
+		t.Fatalf("model preparation status=%d body=%s node=%q model=%q", prepared.Code, prepared.Body.String(), preparedNodeID, preparedModelID)
+	}
+	prepareErr = ErrNodeNoCapacity
+	failedPreparation := request(http.MethodPost, preparePath, "{}", ownerCookie, ownerCSRF)
+	if failedPreparation.Code != http.StatusServiceUnavailable || failedPreparation.Header().Get("Retry-After") != "2" ||
+		!strings.Contains(failedPreparation.Body.String(), `"code":"no_capacity"`) {
+		t.Fatalf("unavailable model preparation status=%d headers=%v body=%s", failedPreparation.Code, failedPreparation.Header(), failedPreparation.Body.String())
 	}
 
 	pageOne := request(http.MethodGet, "/api/nodes?limit=1", "", ownerCookie, "")

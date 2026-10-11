@@ -48,7 +48,7 @@ var (
 )
 
 type Config struct {
-	InferenceMode          string
+	InferenceMode           string
 	Origin                  string
 	PrivacyNoticeVersion    string
 	Pepper                  []byte
@@ -1266,7 +1266,7 @@ redis.call('XADD',KEYS[2],'MAXLEN','~',100,ARGV[1],'event_id',ARGV[2],'request_i
 redis.call('XADD',KEYS[4],'MAXLEN',100,ARGV[1],'event_id',ARGV[2],'request_id',ARGV[5],'payload',ARGV[3])
 redis.call('XADD',KEYS[3],'MAXLEN',10000,'*','topic','usage','resource_id',ARGV[5],'revision',ARGV[6],'action','invalidate')
 local now=redis.call('TIME')
-local cutoff=tostring(tonumber(now[1])-86400)..'-0'
+local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
 redis.call('XTRIM',KEYS[3],'MINID',cutoff)
 redis.call('EXPIRE',KEYS[3],86400)
 redis.call('SET',KEYS[1],ARGV[4],'EX',2592000)

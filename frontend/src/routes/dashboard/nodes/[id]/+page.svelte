@@ -3,8 +3,9 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { ApiFailure } from '$lib/api/client.ts';
-  import { fetchNode, renameNode, revokeNode } from '$lib/api/account.ts';
+  import { fetchNode, prepareNodeModel, renameNode, revokeNode } from '$lib/api/account.ts';
   import type { Node } from '$lib/api/generated/contracts.ts';
+  import { startNodeLive } from '$lib/live/nodes.ts';
   import { language } from '$lib/state/language.svelte.ts';
   import { session } from '$lib/state/session.svelte.ts';
 
@@ -12,6 +13,8 @@
   let generation = $state(-1);
   let request: AbortController | undefined;
   let removeSessionCleanup = () => {};
+  let stopNodeLive = () => {};
+  let pendingNodeRefresh = false;
   let loadedNodeID = '';
   let revokeDialog = $state<HTMLDialogElement>();
   let node = $state<Node | null>(null);
@@ -26,6 +29,8 @@
 
   function clearTransientState() {
     active = false;
+    stopNodeLive();
+    stopNodeLive = () => {};
     request?.abort();
     request = undefined;
     node = null;
@@ -35,6 +40,7 @@
     successMessage = '';
     showRevoke = false;
     confirmedRevoke = false;
+    pendingNodeRefresh = false;
   }
 
   onMount(() => {
@@ -45,15 +51,34 @@
       if (!loaded) { clearTransientState(); return; }
       generation = session.generation;
       removeSessionCleanup = session.addLiveCleanup(clearTransientState);
+      stopNodeLive = startNodeLive((resourceIDs) => {
+        const id = page.params.id;
+        if (!id || !currentSession() || (resourceIDs !== null && !resourceIDs.includes(id))) return;
+        if (processing) {
+          pendingNodeRefresh = true;
+          return;
+        }
+        void loadNode(id);
+      });
     });
     return () => {
       removeSessionCleanup();
+      stopNodeLive();
+      stopNodeLive = () => {};
       clearTransientState();
     };
   });
 
   function currentSession() {
     return active && session.generation === generation && session.session !== null;
+  }
+
+  function finishProcessing() {
+    if (!currentSession()) return;
+    processing = false;
+    if (!pendingNodeRefresh || !node) return;
+    pendingNodeRefresh = false;
+    void loadNode(node.id);
   }
 
   $effect(() => {
@@ -127,7 +152,7 @@
       if (!controller.signal.aborted && currentSession()) errorMessage = describeError(value);
     } finally {
       if (request === controller) request = undefined;
-      if (currentSession()) processing = false;
+      finishProcessing();
     }
   }
 
@@ -149,7 +174,43 @@
       if (!controller.signal.aborted && currentSession()) errorMessage = describeError(value);
     } finally {
       if (request === controller) request = undefined;
-      if (currentSession()) processing = false;
+      finishProcessing();
+    }
+  }
+
+  async function prepareModel(modelID: string) {
+    if (!node || processing || !currentSession()) return;
+    const current = session.session;
+    if (!current) return;
+    const controller = new AbortController();
+    request = controller;
+    processing = true;
+    errorMessage = '';
+    successMessage = '';
+    try {
+      const result = await prepareNodeModel(node.id, modelID, current.csrf_token, controller.signal);
+      if (controller.signal.aborted || !currentSession()) return;
+      successMessage = result.status === 'ready'
+        ? (ru ? `Модель ${modelID} готова и прошла проверку ёмкости.` : `Model ${modelID} is ready and capacity-verified.`)
+        : result.status === 'benchmarking'
+          ? (ru ? `Модель ${modelID} загружена; сервер проверяет её ёмкость.` : `Model ${modelID} is loaded; the server is checking its capacity.`)
+          : (ru ? `Подготовка ${modelID} началась. Обновите сведения через несколько секунд.` : `Preparation for ${modelID} started. Refresh the node details in a few seconds.`);
+      if (result.status === 'ready') node = await fetchNode(node.id, controller.signal);
+    } catch (value) {
+      if (!controller.signal.aborted && currentSession()) {
+        if (value instanceof ApiFailure && value.code === 'model_not_found') {
+          errorMessage = ru ? 'Этой модели нет в подписанном каталоге.' : 'This model is not in the signed catalog.';
+        } else if (value instanceof ApiFailure && value.code === 'model_warming') {
+          errorMessage = ru ? 'Нода уже готовит модель. Повторите позже.' : 'The node is already preparing a model. Try again later.';
+        } else if (value instanceof ApiFailure && value.code === 'no_capacity') {
+          errorMessage = ru ? 'Нода сейчас не может подготовить модель: проверьте подключение и ресурсы.' : 'The node cannot prepare this model right now. Check its connection and resources.';
+        } else {
+          errorMessage = describeError(value);
+        }
+      }
+    } finally {
+      if (request === controller) request = undefined;
+      finishProcessing();
     }
   }
 
@@ -219,7 +280,7 @@
 
       <section class="account-panel"><p class="eyebrow">{ru ? 'МОДЕЛИ' : 'MODELS'}</p><h2>{ru ? 'Состояние моделей' : 'Model state'}</h2>
         {#if node.models.length === 0}<p class="node-list-placeholder">{ru ? 'Нет текущих отчётов о моделях.' : 'No current model reports.'}</p>
-        {:else}<ul class="node-model-list">{#each node.models as model (model.model_id)}<li><div><strong>{model.model_id}</strong><small>{new Date(model.updated_at).toLocaleString(ru ? 'ru' : 'en')}</small></div><span>{model.state}</span><small>{model.active_slots} / {model.max_slots} {ru ? 'слотов' : 'slots'}</small></li>{/each}</ul>{/if}
+        {:else}<ul class="node-model-list">{#each node.models as model (model.model_id)}<li><div><strong>{model.model_id}</strong><small>{new Date(model.updated_at).toLocaleString(ru ? 'ru' : 'en')}</small></div><span>{model.state}</span><small>{model.active_slots} / {model.max_slots} {ru ? 'слотов' : 'slots'}</small><button class="secondary" type="button" aria-label={`${ru ? 'Подготовить модель' : 'Prepare model'} ${model.model_id}`} disabled={processing || node.status === 'offline' || node.status === 'draining' || node.status === 'quarantined'} onclick={() => void prepareModel(model.model_id)}>{processing ? (ru ? 'Подготовка…' : 'Preparing…') : (model.state === 'loaded' ? (ru ? 'Проверить готовность' : 'Check readiness') : (ru ? 'Подготовить' : 'Prepare'))}</button></li>{/each}</ul>{/if}
       </section>
 
       <section class="account-panel"><p class="eyebrow">{ru ? 'НАЧИСЛЕНИЯ' : 'EARNINGS'}</p><h2>{ru ? 'Выплаты ноды' : 'Node earnings'}</h2>

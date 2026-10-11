@@ -19,14 +19,15 @@ import (
 )
 
 type Handler struct {
-	store        *Store
-	cfg          Config
-	nodes        *nodeService
-	catalog      NodeCatalogSnapshot
-	ledger       AccountingReader
-	authenticate api.Authenticator
-	requests     *api.RequestRegistry
-	ready        func(context.Context) error
+	store         *Store
+	cfg           Config
+	nodes         *nodeService
+	modelPreparer NodeModelPreparer
+	catalog       NodeCatalogSnapshot
+	ledger        AccountingReader
+	authenticate  api.Authenticator
+	requests      *api.RequestRegistry
+	ready         func(context.Context) error
 }
 
 type AccountingReader interface {
@@ -37,7 +38,7 @@ type AccountingReader interface {
 }
 
 func NewHandler(cfg Config, store *Store, provider inference.Provider, readiness ...func(context.Context) error) (http.Handler, error) {
-	return newHandler(cfg, store, provider, nil, nil, readiness...)
+	return newHandler(cfg, store, provider, nil, nil, nil, readiness...)
 }
 
 func NewHandlerWithLedger(cfg Config, store *Store, provider inference.Provider, ledger AccountingReader,
@@ -45,7 +46,7 @@ func NewHandlerWithLedger(cfg Config, store *Store, provider inference.Provider,
 	if ledger == nil {
 		return nil, errors.New("M3 request ledger is required")
 	}
-	return newHandler(cfg, store, provider, nil, ledger, readiness...)
+	return newHandler(cfg, store, provider, nil, ledger, nil, readiness...)
 }
 
 func NewHandlerWithLedgerAndExecutor(cfg Config, store *Store, executor api.CompletionExecutor, ledger AccountingReader,
@@ -53,11 +54,20 @@ func NewHandlerWithLedgerAndExecutor(cfg Config, store *Store, executor api.Comp
 	if ledger == nil || executor == nil {
 		return nil, errors.New("M3 ledger and completion executor are required")
 	}
-	return newHandler(cfg, store, nil, executor, ledger, readiness...)
+	return newHandler(cfg, store, nil, executor, ledger, nil, readiness...)
+}
+
+func NewHandlerWithLedgerAndExecutorAndNodeModelPreparer(cfg Config, store *Store,
+	executor api.CompletionExecutor, ledger AccountingReader, modelPreparer NodeModelPreparer,
+	readiness ...func(context.Context) error) (http.Handler, error) {
+	if ledger == nil || executor == nil || modelPreparer == nil {
+		return nil, errors.New("M3 ledger, completion executor, and node model preparer are required")
+	}
+	return newHandler(cfg, store, nil, executor, ledger, modelPreparer, readiness...)
 }
 
 func newHandler(cfg Config, store *Store, provider inference.Provider, executor api.CompletionExecutor, ledger AccountingReader,
-	readiness ...func(context.Context) error) (http.Handler, error) {
+	modelPreparer NodeModelPreparer, readiness ...func(context.Context) error) (http.Handler, error) {
 	if store == nil {
 		return nil, errors.New("M1 store is required")
 	}
@@ -77,7 +87,8 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 	if err != nil {
 		return nil, err
 	}
-	h := &Handler{store: store, cfg: cfg, catalog: catalog, ledger: ledger, authenticate: store.Authenticate, requests: requests}
+	h := &Handler{store: store, cfg: cfg, modelPreparer: modelPreparer, catalog: catalog, ledger: ledger,
+		authenticate: store.Authenticate, requests: requests}
 	if len(cfg.NodeSecretEncryptionKey) > 0 || len(cfg.NodeJWTSigningKey) > 0 {
 		h.nodes, err = store.ensureNodeService(cfg)
 		if err != nil {
@@ -115,6 +126,7 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 		mux.HandleFunc("/api/nodes", h.nodesInventory)
 		mux.HandleFunc("/api/nodes/link", h.linkNode)
 		mux.HandleFunc("/api/nodes/{id}", h.nodeDetail)
+		mux.HandleFunc("/api/nodes/{id}/models/{model_id}/prepare", h.prepareNodeModel)
 		mux.HandleFunc("/api/nodes/{id}/revoke", h.revokeNode)
 		mux.HandleFunc("/api/node/enrollments", h.createNodeEnrollment)
 		mux.HandleFunc("/api/node/enrollments/token", h.pollNodeEnrollment)

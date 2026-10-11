@@ -53,6 +53,7 @@ pub struct LlamaRunner {
     api_key: String,
     client: Client,
     process: Mutex<Child>,
+    #[cfg(unix)]
     process_id: u32,
     key_file: PathBuf,
     slots: SlotPool,
@@ -177,6 +178,7 @@ impl LlamaRunner {
         let mut child = command.spawn().map_err(|_| {
             NodeError::Model("could not start the configured llama-server executable".into())
         })?;
+        #[cfg(unix)]
         let process_id = child
             .id()
             .ok_or_else(|| NodeError::Model("llama-server did not expose a process id".into()))?;
@@ -225,6 +227,7 @@ impl LlamaRunner {
             api_key,
             client,
             process: Mutex::new(child),
+            #[cfg(unix)]
             process_id,
             key_file: key_file.into_path(),
             slots: SlotPool::new(slots),

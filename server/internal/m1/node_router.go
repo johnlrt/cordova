@@ -96,6 +96,9 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 	if !deadline.After(now) {
 		return nil, request.ErrNoCapacity
 	}
+	routeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	ctx = routeCtx
 	requiredCapacity, ok := oneSlotCapacity(manifest)
 	if !ok {
 		return nil, request.ErrNoCapacity
@@ -118,10 +121,11 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 	if err != nil {
 		return nil, err
 	}
-	var loaded []c3RouteCandidate
+	var loaded, onDisk []c3RouteCandidate
 	for _, profile := range profiles {
 		state, ok := states[profile.nodeID]
-		if !ok || state.State != "loaded" || state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
+		if !ok || state.ReasonCode != nil || (state.State != "loaded" && state.State != "on_disk") ||
+			state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
 			continue
 		}
 		active, err := r.nodes.activeNodeModelLeaseCount(ctx, profile.nodeID, profile.sessionID,
@@ -129,11 +133,14 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 		if err != nil {
 			return nil, err
 		}
-		if active >= int64(profile.profile.VerifiedSlots) {
-			continue
+		candidate := profile
+		candidate.activeLeases = active
+		candidate.rank = profile.profile.Rank
+		if state.State == "loaded" && active < int64(profile.profile.VerifiedSlots) {
+			loaded = append(loaded, candidate)
+		} else if state.State == "on_disk" && active == 0 {
+			onDisk = append(onDisk, candidate)
 		}
-		loaded = append(loaded, c3RouteCandidate{nodeID: profile.nodeID, profile: profile.profile,
-			activeLeases: active, rank: profile.profile.Rank})
 	}
 	loadedIdle, loadedBusy := make([]c3RouteCandidate, 0), make([]c3RouteCandidate, 0)
 	for _, candidate := range loaded {
@@ -162,7 +169,47 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 			}
 		}
 	}
-	warming, err := r.scheduleModelPreparation(ctx, manifest, excluded, time.Now().UTC())
+	rankC3Candidates(onDisk)
+	preparationExcluded := make(map[string]struct{}, len(excluded)+len(onDisk))
+	for nodeID := range excluded {
+		preparationExcluded[nodeID] = struct{}{}
+	}
+	for _, candidate := range onDisk {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if r.modelLoads == nil {
+			break
+		}
+		preparationExcluded[candidate.nodeID] = struct{}{}
+		loadCtx, cancel := context.WithDeadline(ctx, deadline)
+		err := r.modelLoads.loadOnDisk(loadCtx, candidate, manifest)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if !retryableNodePreparationError(err) {
+				return nil, err
+			}
+			continue
+		}
+		attempt, err := r.nodes.acquireNodeInferenceAttempt(ctx, candidate.nodeID, modelID, r.catalog.Version,
+			manifest.ArtifactSHA256, requiredCapacity, deadline)
+		if err == nil {
+			return attempt, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !retryableNodePreparationError(err) {
+			return nil, err
+		}
+	}
+	if !deadline.After(time.Now()) {
+		return nil, request.ErrNoCapacity
+	}
+	warming, err := r.scheduleModelPreparation(ctx, manifest, preparationExcluded, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +217,13 @@ func (r *c3RequestRouter) Acquire(ctx context.Context, modelID string, excluded 
 		return nil, request.ErrModelWarming
 	}
 	return nil, request.ErrNoCapacity
+}
+
+func retryableNodePreparationError(err error) bool {
+	return errors.Is(err, ErrNodeNoCapacity) || errors.Is(err, ErrNodeSlotUnavailable) ||
+		errors.Is(err, ErrNodeSessionUnavailable) || errors.Is(err, ErrNodeConflict) ||
+		errors.Is(err, ErrNodeBenchmarkActive) || errors.Is(err, ErrNodePreparationActive) ||
+		errors.Is(err, ErrNodeModelCommandRejected) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (r *c3RequestRouter) freshProfiles(ctx context.Context, manifest NodeCatalogManifest, requiredCapacity uint64,
@@ -254,12 +308,13 @@ func (r *c3RequestRouter) scheduleModelPreparation(ctx context.Context, manifest
 	if err != nil || len(peers) == 0 {
 		return false, err
 	}
+	byNode := make(map[string]nodeCapacityProfile)
 	if requiredCapacity, ok := oneSlotCapacity(manifest); ok {
 		profiles, profileErr := r.freshProfiles(ctx, manifest, requiredCapacity, excluded, now)
 		if profileErr != nil {
 			return false, profileErr
 		}
-		byNode := make(map[string]nodeCapacityProfile, len(profiles))
+		byNode = make(map[string]nodeCapacityProfile, len(profiles))
 		for _, profile := range profiles {
 			byNode[profile.nodeID] = profile.profile
 		}
@@ -278,16 +333,53 @@ func (r *c3RequestRouter) scheduleModelPreparation(ctx context.Context, manifest
 	scheduled := false
 	for _, peer := range peers {
 		state, ok := states[peer.nodeID]
-		if !ok || state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
+		if !ok || state.ReasonCode != nil {
 			continue
 		}
 		switch state.State {
 		case "loaded":
+			if state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
+				continue
+			}
+			if _, currentProfile := byNode[peer.nodeID]; currentProfile {
+				continue
+			}
+			busy, busyErr := r.nodes.hasActiveNodeLeases(ctx, peer.nodeID, peer.sessionID, peer.generation)
+			if busyErr != nil {
+				return false, busyErr
+			}
+			if busy {
+				continue
+			}
 			if r.benchmarks != nil && r.benchmarks.schedule(peer.nodeID, manifest.Model.ID, peer.hardware) {
 				scheduled = true
 			}
 		case "on_disk":
-			if r.modelLoads != nil && r.modelLoads.schedule(peer, manifest.Model.ID) {
+			if state.ArtifactSHA256 == nil || *state.ArtifactSHA256 != manifest.ArtifactSHA256 {
+				continue
+			}
+			busy, busyErr := r.nodes.hasActiveNodeLeases(ctx, peer.nodeID, peer.sessionID, peer.generation)
+			if busyErr != nil {
+				return false, busyErr
+			}
+			if busy {
+				continue
+			}
+			if r.modelLoads != nil && r.modelLoads.schedule(peer, manifest.Model.ID, state.State, 0) {
+				scheduled = true
+			}
+		case "absent":
+			if state.ArtifactSHA256 != nil || state.AvailableDiskBytes < manifest.ArtifactSizeBytes {
+				continue
+			}
+			busy, busyErr := r.nodes.hasActiveNodeLeases(ctx, peer.nodeID, peer.sessionID, peer.generation)
+			if busyErr != nil {
+				return false, busyErr
+			}
+			if busy {
+				continue
+			}
+			if r.modelLoads != nil && r.modelLoads.schedule(peer, manifest.Model.ID, state.State, manifest.ArtifactSizeBytes) {
 				scheduled = true
 			}
 		}

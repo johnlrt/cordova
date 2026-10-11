@@ -1,6 +1,6 @@
 import { ApiFailure } from './client.ts';
 import { matchesOpenApi } from './generated/contracts.ts';
-import type { AccountErrorResponse, LiveTicket, Node, NodePage, RegistrationResult, SessionView } from './generated/contracts.ts';
+import type { AccountErrorResponse, LiveTicket, Node, NodeModelPreparation, NodePage, RegistrationResult, SessionView } from './generated/contracts.ts';
 export type { Account, RegistrationResult, SessionView } from './generated/contracts.ts';
 export function decodeSession(value: unknown): SessionView {
   if (!matchesOpenApi(value, 'SessionView')) throw new ApiFailure('invalid_response');
@@ -24,7 +24,7 @@ function decodeError(response: Response, value: unknown): ApiFailure {
 }
 
 async function accountRequest(path: string, options: {
-  method?: 'GET' | 'POST' | 'PATCH'; body?: Record<string, unknown>; csrfToken?: string; signal?: AbortSignal; expectedStatus?: number;
+  method?: 'GET' | 'POST' | 'PATCH'; body?: Record<string, unknown>; csrfToken?: string; signal?: AbortSignal; expectedStatus?: number | number[];
 } = {}): Promise<unknown> {
   if (!path.startsWith('/api/') || path.startsWith('//') || path.includes('\\')) throw new ApiFailure('invalid_request');
   let url: URL;
@@ -54,7 +54,9 @@ async function accountRequest(path: string, options: {
   let value: unknown;
   try { value = await response.json(); } catch { throw new ApiFailure('invalid_response', response.status); }
   if (!response.ok) throw decodeError(response, value);
-  if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) throw new ApiFailure('invalid_response', response.status);
+  if (options.expectedStatus !== undefined && !(Array.isArray(options.expectedStatus)
+    ? options.expectedStatus.includes(response.status)
+    : response.status === options.expectedStatus)) throw new ApiFailure('invalid_response', response.status);
   return value;
 }
 
@@ -161,4 +163,15 @@ export async function revokeNode(nodeID: string, csrfToken: string, signal?: Abo
   await accountRequest(`/api/nodes/${nodeIdPath(nodeID)}/revoke`, {
     method: 'POST', body: {}, csrfToken, signal, expectedStatus: 204
   });
+}
+
+export async function prepareNodeModel(nodeID: string, modelID: string, csrfToken: string,
+  signal?: AbortSignal): Promise<NodeModelPreparation> {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(modelID) || modelID.length > 128) throw new ApiFailure('invalid_request');
+  if (!csrfToken) throw new ApiFailure('csrf_failed', 403);
+  const value = await accountRequest(`/api/nodes/${nodeIdPath(nodeID)}/models/${encodeURIComponent(modelID)}/prepare`, {
+    method: 'POST', body: {}, csrfToken, signal, expectedStatus: [200, 202]
+  });
+  if (!matchesOpenApi(value, 'NodeModelPreparation')) throw new ApiFailure('invalid_response');
+  return value as NodeModelPreparation;
 }

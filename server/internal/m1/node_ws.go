@@ -75,12 +75,13 @@ type nodeModelRefPayload struct {
 }
 
 type nodeModelStatePayload struct {
-	ModelID        string  `json:"model_id"`
-	State          string  `json:"state"`
-	ArtifactSHA256 *string `json:"artifact_sha256"`
-	ActiveSlots    uint32  `json:"active_slots"`
-	MaxSlots       uint32  `json:"max_slots"`
-	ReasonCode     *string `json:"reason_code"`
+	ModelID            string  `json:"model_id"`
+	State              string  `json:"state"`
+	ArtifactSHA256     *string `json:"artifact_sha256"`
+	ActiveSlots        uint32  `json:"active_slots"`
+	MaxSlots           uint32  `json:"max_slots"`
+	ReasonCode         *string `json:"reason_code"`
+	AvailableDiskBytes uint64  `json:"available_disk_bytes"`
 }
 
 type nodeCatalogGetPayload struct {
@@ -114,6 +115,8 @@ type cachedNodeReply struct {
 func nodeSessionKey(nodeID string) string    { return "cv:v1:node-session:" + nodeID }
 func nodeGenerationKey(nodeID string) string { return "cv:v1:node-generation:" + nodeID }
 func nodeHeartbeatKey(nodeID string) string  { return "cv:v1:node-heartbeat:" + nodeID }
+func nodeRevisionKey(nodeID string) string   { return "cv:v1:node-revision:" + nodeID }
+func accountLiveKey(accountID string) string { return "cv:v1:live:" + accountID }
 func nodeModelStateKey(nodeID, modelID string) string {
 	return "cv:v1:node-model-state:" + nodeID + ":" + modelID
 }
@@ -125,15 +128,24 @@ local generation_type=redis.call('TYPE',KEYS[2]).ok
 local session_type=redis.call('TYPE',KEYS[3]).ok
 local leases_type=redis.call('TYPE',KEYS[5]).ok
 local details_type=redis.call('TYPE',KEYS[6]).ok
+local revision_type=redis.call('TYPE',KEYS[7]).ok
+local live_type=redis.call('TYPE',KEYS[8]).ok
 if node_type~='string' or (generation_type~='none' and generation_type~='string') or (session_type~='none' and session_type~='string') or
-   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node session key type mismatch') end
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node session key type mismatch') end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(node)~='table' or node['id']~=ARGV[1] or node['owner_id']~=ARGV[2] or node['secret_version']~=tonumber(ARGV[3]) or node['revoked']~=false then return false end
 local generation=redis.call('INCR',KEYS[2])
 redis.call('SET',KEYS[3],ARGV[4]..':'..generation,'EX',ARGV[5])
 redis.call('DEL',KEYS[4],KEYS[5],KEYS[6])
+local revision=redis.call('INCR',KEYS[7])
+redis.call('XADD',KEYS[8],'MAXLEN',10000,'*','topic','nodes','resource_id',ARGV[1],'revision',tostring(revision),'action','invalidate')
+local now=redis.call('TIME')
+local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
+redis.call('XTRIM',KEYS[8],'MINID',cutoff)
+redis.call('EXPIRE',KEYS[8],86400)
 return generation`, []string{nodeRecordKey(identity.NodeID), nodeGenerationKey(identity.NodeID), nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID),
-		nodeLeaseIndexKey(identity.NodeID), nodeLeaseDetailsKey(identity.NodeID)},
+		nodeLeaseIndexKey(identity.NodeID), nodeLeaseDetailsKey(identity.NodeID), nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID)},
 		identity.NodeID, identity.OwnerID, identity.SecretVersion, sessionID, int64(time.Until(expires).Seconds())).Int64()
 	if err != nil {
 		return 0, err
@@ -170,7 +182,10 @@ func (s *nodeService) recordNodeHeartbeat(ctx context.Context, identity nodeIden
 local session_type=redis.call('TYPE',KEYS[1]).ok
 local node_type=redis.call('TYPE',KEYS[2]).ok
 local heartbeat_type=redis.call('TYPE',KEYS[3]).ok
-if session_type~='string' or node_type~='string' or (heartbeat_type~='none' and heartbeat_type~='string') then return redis.error_reply('node heartbeat key type mismatch') end
+local revision_type=redis.call('TYPE',KEYS[4]).ok
+local live_type=redis.call('TYPE',KEYS[5]).ok
+if session_type~='string' or node_type~='string' or (heartbeat_type~='none' and heartbeat_type~='string') or
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node heartbeat key type mismatch') end
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return 0 end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
 if not ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false then return 0 end
@@ -178,7 +193,14 @@ node['hardware']=cjson.decode(ARGV[8])
 node['last_seen_at']=ARGV[9]
 redis.call('SET',KEYS[2],cjson.encode(node))
 redis.call('SET',KEYS[3],ARGV[6],'EX',ARGV[7])
-return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID)},
+local revision=redis.call('INCR',KEYS[4])
+redis.call('XADD',KEYS[5],'MAXLEN',10000,'*','topic','nodes','resource_id',ARGV[3],'revision',tostring(revision),'action','invalidate')
+local now=redis.call('TIME')
+local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
+redis.call('XTRIM',KEYS[5],'MINID',cutoff)
+redis.call('EXPIRE',KEYS[5],86400)
+return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID),
+		nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID)},
 		sessionID, identity.Generation, identity.NodeID, identity.OwnerID, identity.SecretVersion, string(encoded),
 		int64(nodeHeartbeatLimit.Seconds()), string(hardware), heartbeat.Received).Int()
 	if err != nil {
@@ -200,12 +222,22 @@ func (s *nodeService) recordNodeModelState(ctx context.Context, identity nodeIde
 local session_type=redis.call('TYPE',KEYS[1]).ok
 local node_type=redis.call('TYPE',KEYS[2]).ok
 local state_type=redis.call('TYPE',KEYS[3]).ok
-if session_type~='string' or node_type~='string' or (state_type~='none' and state_type~='string') then return redis.error_reply('node model state key type mismatch') end
+local revision_type=redis.call('TYPE',KEYS[4]).ok
+local live_type=redis.call('TYPE',KEYS[5]).ok
+if session_type~='string' or node_type~='string' or (state_type~='none' and state_type~='string') or
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node model state key type mismatch') end
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return 0 end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
 if not ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false then return 0 end
 redis.call('SET',KEYS[3],ARGV[6],'EX',ARGV[7])
-return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.NodeID), nodeModelStateKey(identity.NodeID, state.ModelID)},
+local revision=redis.call('INCR',KEYS[4])
+redis.call('XADD',KEYS[5],'MAXLEN',10000,'*','topic','nodes','resource_id',ARGV[3],'revision',tostring(revision),'action','invalidate')
+local now=redis.call('TIME')
+local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
+redis.call('XTRIM',KEYS[5],'MINID',cutoff)
+redis.call('EXPIRE',KEYS[5],86400)
+return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.NodeID), nodeModelStateKey(identity.NodeID, state.ModelID),
+		nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID)},
 		sessionID, identity.Generation, identity.NodeID, identity.OwnerID, identity.SecretVersion, string(encoded), int64(nodeHeartbeatLimit.Seconds())).Int()
 	if err != nil {
 		return err
@@ -222,14 +254,23 @@ local session_type=redis.call('TYPE',KEYS[1]).ok
 local heartbeat_type=redis.call('TYPE',KEYS[2]).ok
 local leases_type=redis.call('TYPE',KEYS[3]).ok
 local details_type=redis.call('TYPE',KEYS[4]).ok
+local revision_type=redis.call('TYPE',KEYS[5]).ok
+local live_type=redis.call('TYPE',KEYS[6]).ok
 if (session_type~='none' and session_type~='string') or (heartbeat_type~='none' and heartbeat_type~='string') or
-   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node session key type mismatch') end
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node session key type mismatch') end
 if redis.call('GET',KEYS[1])==ARGV[1]..':'..ARGV[2] then
   redis.call('DEL',KEYS[1],KEYS[2],KEYS[3],KEYS[4])
+  local revision=redis.call('INCR',KEYS[5])
+  redis.call('XADD',KEYS[6],'MAXLEN',10000,'*','topic','nodes','resource_id',ARGV[3],'revision',tostring(revision),'action','invalidate')
+  local now=redis.call('TIME')
+  local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
+  redis.call('XTRIM',KEYS[6],'MINID',cutoff)
+  redis.call('EXPIRE',KEYS[6],86400)
   return 1
 end
 return 0`, []string{nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID), nodeLeaseIndexKey(identity.NodeID),
-		nodeLeaseDetailsKey(identity.NodeID)}, sessionID, identity.Generation).Err()
+		nodeLeaseDetailsKey(identity.NodeID), nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID)}, sessionID, identity.Generation, identity.NodeID).Err()
 }
 
 func (h *Handler) nodeWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -499,7 +540,7 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 			replies[frame.MessageID] = cachedNodeReply{Type: "catalog.snapshot", RequestID: nullableUUID(frame.RequestID), Payload: h.catalog}
 		case "model.state":
 			var model nodeModelStatePayload
-			if decodeNodePayload(frame.Payload, &model, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code") != nil ||
+			if decodeNodePayload(frame.Payload, &model, "model_id", "state", "artifact_sha256", "active_slots", "max_slots", "reason_code", "available_disk_bytes") != nil ||
 				!validNodeModelState(model) {
 				peer.sendError(nullableUUID(frame.RequestID), "model.state", "invalid_message", "The model state is invalid.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid model state")
@@ -769,6 +810,7 @@ func validModelSlug(value string) bool {
 func validNodeModelState(model nodeModelStatePayload) bool {
 	if !validModelSlug(model.ModelID) || (model.State != "loaded" && model.State != "on_disk" && model.State != "absent") ||
 		model.ActiveSlots > model.MaxSlots || (model.State == "loaded" && model.MaxSlots == 0) ||
+		model.AvailableDiskBytes > (1<<53)-1 ||
 		(model.ArtifactSHA256 != nil && !validNodeHash(*model.ArtifactSHA256)) ||
 		(model.ReasonCode != nil && !validNodeText(*model.ReasonCode, 64)) {
 		return false

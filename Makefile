@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: contracts-check test-ledger-recovery test-ledger-redis test-ledger-redis-process bootstrap-dev config-check verify-infra-foundations up down smoke network-check test-protocol test-edge test-node-transport
+.PHONY: contracts-check test-ledger-recovery test-ledger-redis test-ledger-redis-process test-node-routing test-rank-fraud bootstrap-dev config-check verify-infra-foundations up down smoke network-check test-protocol test-edge test-node-transport
 
 contracts-check:
 	sh scripts/contracts-check.sh
@@ -39,6 +39,13 @@ test-ledger-redis:
 test-ledger-redis-process:
 	@test -n "$${CORDOVA_TEST_REDIS_SERVER:-}" || { echo "CORDOVA_TEST_REDIS_SERVER must point to an isolated redis-server executable" >&2; exit 2; }
 	cd server && $(GO) test -race -count=1 -v -run '^TestRedisJournalIntegrationRedisProcessRestartAfterAppend$$' ./internal/billing
+
+test-node-routing:
+	@test -n "$${CORDOVA_TEST_REDIS_URL:-}" || { echo "CORDOVA_TEST_REDIS_URL must point to an isolated local Redis instance" >&2; exit 2; }
+	cd server && $(GO) test -race -count=1 -v ./internal/mocknode ./internal/m1
+
+test-rank-fraud:
+	cd server && $(GO) test -race -count=1 -v ./internal/ranker
 
 test-edge:
 	python3 scripts/test-edge.py

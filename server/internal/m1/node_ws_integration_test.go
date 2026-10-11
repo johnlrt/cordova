@@ -57,7 +57,8 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	t.Cleanup(func() {
 		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cleanCancel()
-		_ = client.Del(cleanCtx, nodeRecordKey(node.ID), nodeSessionKey(node.ID), nodeGenerationKey(node.ID), nodeHeartbeatKey(node.ID), nodeModelStateKey(node.ID, "cordova-chat-small-v1")).Err()
+		_ = client.Del(cleanCtx, nodeRecordKey(node.ID), nodeSessionKey(node.ID), nodeGenerationKey(node.ID), nodeHeartbeatKey(node.ID),
+			nodeRevisionKey(node.ID), nodeModelStateKey(node.ID, "cordova-chat-small-v1"), accountLiveKey(ownerID.String())).Err()
 	})
 	api, err := NewHandler(config, store, inference.Mock{})
 	if err != nil {
@@ -135,9 +136,15 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	if _, err := client.Get(ctx, nodeHeartbeatKey(node.ID)).Result(); err != nil {
 		t.Fatalf("heartbeat metadata was not persisted: %v", err)
 	}
+	liveEvents, liveCursor, err := store.LiveEvents(ctx, ownerID.String(), "0-0")
+	if err != nil || len(liveEvents) != 2 || liveEvents[0].Topic != "nodes" || liveEvents[0].ResourceID != node.ID ||
+		liveEvents[0].Revision != 1 || liveEvents[1].Topic != "nodes" || liveEvents[1].ResourceID != node.ID ||
+		liveEvents[1].Revision != 2 || liveEvents[1].Action != "invalidate" {
+		t.Fatalf("node session and heartbeat live invalidations=%+v cursor=%q err=%v", liveEvents, liveCursor, err)
+	}
 	modelMessage, _ := domain.NewID()
 	modelState := map[string]any{"model_id": "cordova-chat-small-v1", "state": "loaded", "artifact_sha256": strings.Repeat("b", 64),
-		"active_slots": 0, "max_slots": 1, "reason_code": nil}
+		"active_slots": 0, "max_slots": 1, "reason_code": nil, "available_disk_bytes": 1 << 40}
 	writeTestNodeFrame(t, first, 5, "model.state", modelMessage.String(), "", firstSession, modelState)
 	barrierRequest, _ := domain.NewID()
 	barrierMessage, _ := domain.NewID()
@@ -149,6 +156,11 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	if err != nil || !strings.Contains(storedState, `"state":"loaded"`) {
 		t.Fatalf("model state was not persisted: value=%q err=%v", storedState, err)
 	}
+	modelEvents, _, err := store.LiveEvents(ctx, ownerID.String(), liveCursor)
+	if err != nil || len(modelEvents) != 2 || modelEvents[0].Topic != "nodes" || modelEvents[0].ResourceID != node.ID ||
+		modelEvents[0].Revision != 3 || modelEvents[1].Topic != "nodes" || modelEvents[1].ResourceID != node.ID || modelEvents[1].Revision != 4 {
+		t.Fatalf("model-state and heartbeat invalidations=%+v err=%v", modelEvents, err)
+	}
 
 	second, secondSession, secondCatalogVersion := dialTestNode(t, wsURL, secondToken, node.ID)
 	defer second.Close()
@@ -157,6 +169,10 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	}
 	if firstSession == secondSession {
 		t.Fatal("reconnect reused the previous session ID")
+	}
+	reconnectEvents, _, err := store.LiveEvents(ctx, ownerID.String(), liveCursor)
+	if err != nil || len(reconnectEvents) != 1 || reconnectEvents[0].Topic != "nodes" || reconnectEvents[0].ResourceID != node.ID || reconnectEvents[0].Revision != 5 {
+		t.Fatalf("replacement-session invalidation=%+v err=%v", reconnectEvents, err)
 	}
 	staleRequest, _ := domain.NewID()
 	staleMessage, _ := domain.NewID()
