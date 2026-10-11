@@ -1614,8 +1614,7 @@ mod socks5h_tests {
             proxy: Some(format!("socks5h://{proxy_address}")),
             ..Config::default()
         };
-        let target = Url::parse(&format!("ws://{direct_address}/api/node/ws"))
-            .expect("target URL");
+        let target = Url::parse(&format!("ws://{direct_address}/api/node/ws")).expect("target URL");
         let error = match open_socket(&config, target, "test-access-token").await {
             Err(NodeError::WebSocket(message)) => message,
             Err(error) => panic!("unexpected error: {error}"),
