@@ -131,6 +131,12 @@ jobs:
       - name: Capture safe gateway diagnostics after M1 failure
         if: failure()
         run: docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color gateway
+      - name: Capture safe Kafka error diagnostics after M1 failure
+        if: failure()
+        run: |
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color kafka 2>&1 \
+            | grep -Ei 'ERROR|WARN|exception|authorization|SASL|producer.?id|UNKNOWN_SERVER_ERROR' \
+            | tail -n 100 || true
       - name: Capture safe usage pipeline counters after M1 failure
         if: failure()
         run: |
