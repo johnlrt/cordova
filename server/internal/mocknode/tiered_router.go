@@ -11,6 +11,7 @@ import (
 
 	"cordova/server/internal/api"
 	"cordova/server/internal/domain"
+	"cordova/server/internal/inference"
 	requestcoord "cordova/server/internal/request"
 )
 
@@ -22,12 +23,12 @@ const (
 	maxConcurrentWarmups = 2
 )
 
-type ModelResidency string
+type ModelResidency = inference.ModelResidency
 
 const (
-	ModelLoaded ModelResidency = "loaded"
-	ModelOnDisk ModelResidency = "on_disk"
-	ModelAbsent ModelResidency = "absent"
+	ModelLoaded = inference.ModelLoaded
+	ModelOnDisk = inference.ModelOnDisk
+	ModelAbsent = inference.ModelAbsent
 )
 
 // NodeStatus is the server-observed catalog and benchmark projection used by
@@ -63,13 +64,9 @@ type RemoteModelStatus struct {
 	ArtifactSHA256 string
 }
 
-// ModelController represents the C6 model.query/load/download exchanges.
-// The production C3 transport adapter can implement the same operations.
-type ModelController interface {
-	Query(context.Context, string, string, string) (RemoteModelStatus, error)
-	Load(context.Context, string, string, string) (artifactSHA256 string, err error)
-	Download(context.Context, string, string, string) (artifactSHA256 string, err error)
-}
+// RemoteModelStatus and ModelController are shared with the production C3 adapter.
+type RemoteModelStatus = inference.RemoteModelStatus
+type ModelController = inference.ModelController
 
 type TieredRouterConfig struct {
 	ModelID               string
