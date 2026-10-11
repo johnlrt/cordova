@@ -26,7 +26,7 @@
 
 ## Что ещё не закрыто
 
-- Production tokenizer C9 and real-model parity are absent. The live M1 composition remains zero-priced and must never be used to charge real accounts.
+- The C9 HTTP handler and runnable supervised llama.cpp tokenizer helper now exist. No qualified GGUF or helper/node parity evidence is present, so real-model tokenization is not admitted; the live M1 composition remains zero-priced and must never charge real accounts.
 - Node routing still uses one process-local mock owner in the gateway. Optional C3 enrollment, HMAC challenge/JWT issuance, `/api/node/ws` handshake, Redis-backed generation fencing, configurable signed catalog delivery, heartbeat storage, and validated reply multiplexing now exist. Inference dispatch from the request coordinator, Redis slot/load leases, production catalog/model qualification, and real-model/tokenizer parity remain unimplemented. The new tiered adapter is executable mock routing coverage, not M2 completion.
 - M1 API-key revocation now fences new local request registrations and cancels active request contexts after the key is revoked in Redis. Idempotency mappings and usage projections reconcile from ledger state at startup; injected crashes around the distinct API claim and usage-projection boundaries remain unverified.
 - REST handlers статуса/баланса отражены в OpenAPI и fixtures, но сквозной тест через HTTP auth и Redis-backed ledger ещё не выполнен.
