@@ -91,3 +91,9 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 ### Обработка отказа node-auth — 2026-10-11
 
 Клиент завершает сессию после постоянного отказа авторизации (`401` на challenge, token или WebSocket handshake, а также WS close/error `unauthenticated`), а `408`, `429` и `5xx` оставляет для повторного подключения с backoff. GitHub Actions на Linux прошёл Rust format, workspace tests, clippy и dependency audit для коммита `8bd41d7`, включая HTTP-статусы, WebSocket 401 и close-frame `unauthenticated`. Реальный отзыв node-secret, проверка системного хранилища credentials и transport smoke на поддерживаемых ОС не выполнялись, поэтому B4 остаётся открытым.
+
+## Выбор Kafka для локального Compose — 2026-10-11
+
+Выбран официальный `apache/kafka:4.3.1`, опубликованный Apache Kafka как поддерживаемый релиз. В `contracts/versions.lock.json` записан multi-architecture index digest `sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837`, полученный со страницы официального образа; Compose закрепляет этим digest и брокер, и одноразовый topic initializer. Локальная схема настроена на KRaft, private SASL/PLAIN, отдельные ACL gateway для usage topic и consumer group, отключённый auto-create и 30-дневное хранение usage.
+
+На этом checkout Kafka Compose ещё не запускался: совместимость полного образа, SASL, ACL, тома и gateway-клиента остаётся непроверенной. Это не production-конфигурация: межхостовый TLS/SCRAM, трёхузловой кластер и репликация пока не реализованы. Источники: [поддерживаемые релизы Apache Kafka](https://kafka.apache.org/downloads/), [официальный usage guide Docker-образа](https://github.com/apache/kafka/blob/trunk/docker/examples/README.md), [digest образа Apache Kafka 4.3.1](https://hub.docker.com/layers/apache/kafka/4.3.1).

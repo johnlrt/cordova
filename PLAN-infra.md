@@ -1,14 +1,14 @@
 # Cordova — infrastructure and release agent plan
 
 **Goal:** Make Cordova reproducibly deployable and recoverable with private data services, isolated Monero custody and verified portable node releases.
-**Date:** 2026-10-09 (Asia/Baku). **Version:** v2. **Owner:** infrastructure agent. **Status:** Stage 1 has a Go-only GitHub Actions workflow; Stage 2 has contract schemas and a checker, but CI does not run that checker yet. Compose and deployment manifests do not exist.
+**Date:** 2026-10-09 (Asia/Baku). **Version:** v2. **Owner:** infrastructure agent. **Status:** The Stage 2 contract checker runs in CI. The local M1 Compose source now uses an Apache Kafka 4.3.1 KRaft broker with private SASL/PLAIN access and a gateway-scoped topic/group ACL. The live Compose stack has not yet been validated on this checkout; production overlays, cross-host TLS/SCRAM, backups, wallet services and release plumbing remain open.
 
 Apply planiuer Core (deployment dependencies), Security (network/secrets/custody), Quality (repeatable configuration), and First-Run (clean-stack/restore/release proof). Skip none. Read [PLAN.md](PLAN.md) first; it exclusively owns shared contracts, financial policy, transport/auth rules, persistence requirements, threats, defaults and milestone gates. This file owns deployment manifests, CI/CD, operations, backups and release plumbing. Do not reproduce endpoint/message/ledger schemas here.
 
 ## Summary
 
-First wire the Stage 2 contract checker into the existing CI workflow without requiring Docker or external services.
-Then expose only nginx and keep Redis, Kafka, wallet RPC, tokenizer and workers private.
+The Stage 2 contract checker is wired into the existing CI workflow without requiring Docker or external services.
+Keep only nginx host-published and Redis, Kafka, wallet RPC, tokenizer and workers private.
 Run a default isolated stagenet Compose stack and a capped production overlay.
 Require off-host Redis replica fsync for production money and disable automatic financial failover.
 Use encrypted off-host backups, content-free monitoring and tested reconciliation-led recovery.

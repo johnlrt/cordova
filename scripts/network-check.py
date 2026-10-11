@@ -29,7 +29,7 @@ def main() -> int:
     if edge.returncode or not edge.stdout.strip() or any(not item.startswith("127.0.0.1:8443") for item in edge.stdout.splitlines()):
         print("FAIL: edge is not bound exclusively to localhost:8443", file=sys.stderr)
         return 1
-    for name, port in [("gateway", "8080"), ("mock-node", "8090"), ("redis", "6379"), ("redpanda", "9092")]:
+    for name, port in [("gateway", "8080"), ("mock-node", "8090"), ("redis", "6379"), ("kafka", "9092")]:
         result = subprocess.run(COMPOSE + ["port", name, port], cwd=ROOT, capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
             print(f"FAIL: {name}:{port} has a public host binding", file=sys.stderr)

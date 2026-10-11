@@ -109,13 +109,13 @@ jobs:
           chmod 0644 .local/*
           docker compose -f infra/compose.yaml -f infra/compose.dev.yaml up --build --wait || {
             docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps --all
-            for service_name in edge redpanda; do
+            for service_name in edge kafka; do
               service_container_id="$(docker compose -f infra/compose.yaml -f infra/compose.dev.yaml ps -q "$service_name")"
               if [ -n "$service_container_id" ]; then
                 docker inspect --format "$service_name: {{json .State.Health}}" "$service_container_id" || true
               fi
             done
-            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color edge redis redpanda
+            docker compose -f infra/compose.yaml -f infra/compose.dev.yaml logs --no-color edge redis kafka
             exit 1
           }
           curl --fail --insecure --silent --show-error --max-time 5 https://127.0.0.1:8443/healthz || {
@@ -149,8 +149,8 @@ jobs:
               redis-cli --raw XLEN "$key"
             done
           '
-          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redpanda rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092 || true
-          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T redpanda rpk group describe cordova-usage-projection-v1 --brokers redpanda:9092 || true
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --describe --topic cordova.account.usage.v1 || true
+          docker compose -f infra/compose.yaml -f infra/compose.dev.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 --command-config /run/secrets/kafka_admin_properties --describe --group cordova-usage-projection-v1 || true
       - name: Verify M1 request and edge acceptance flows
         run: |
           make smoke

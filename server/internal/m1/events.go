@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl/plain"
 )
 
 const usageTopic = "cordova.account.usage.v1"
@@ -26,12 +28,26 @@ func NewEvents(client *redis.Client, brokers string) (*Events, error) {
 	if client == nil || strings.TrimSpace(brokers) == "" {
 		return nil, errors.New("Redis and Kafka brokers are required")
 	}
+	username := strings.TrimSpace(os.Getenv("CORDOVA_KAFKA_SASL_USERNAME"))
+	passwordPath := strings.TrimSpace(os.Getenv("CORDOVA_KAFKA_SASL_PASSWORD_FILE"))
+	if username == "" || passwordPath == "" {
+		return nil, errors.New("Kafka SASL credentials are required")
+	}
+	passwordBytes, err := os.ReadFile(passwordPath)
+	if err != nil {
+		return nil, errors.New("Kafka SASL password file is unavailable")
+	}
+	password := strings.TrimSpace(string(passwordBytes))
+	if password == "" {
+		return nil, errors.New("Kafka SASL password file is empty")
+	}
 	seeds := strings.Split(brokers, ",")
-	producer, err := kgo.NewClient(kgo.SeedBrokers(seeds...), kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordRetries(8))
+	auth := plain.Auth{User: username, Pass: password}.AsMechanism()
+	producer, err := kgo.NewClient(kgo.SeedBrokers(seeds...), kgo.SASL(auth), kgo.RequiredAcks(kgo.AllISRAcks()), kgo.RecordRetries(8))
 	if err != nil {
 		return nil, fmt.Errorf("configure Kafka producer: %w", err)
 	}
-	consumer, err := kgo.NewClient(kgo.SeedBrokers(seeds...), kgo.ConsumerGroup("cordova-usage-projection-v1"), kgo.ConsumeTopics(usageTopic), kgo.DisableAutoCommit())
+	consumer, err := kgo.NewClient(kgo.SeedBrokers(seeds...), kgo.SASL(auth), kgo.ConsumerGroup("cordova-usage-projection-v1"), kgo.ConsumeTopics(usageTopic), kgo.DisableAutoCommit())
 	if err != nil {
 		producer.Close()
 		return nil, fmt.Errorf("configure Kafka consumer: %w", err)
