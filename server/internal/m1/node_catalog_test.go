@@ -59,6 +59,64 @@ func TestNodeCatalogRustGoldenFixture(t *testing.T) {
 	}
 }
 
+func TestSignNodeCatalogJSONProducesVerifiedSnapshot(t *testing.T) {
+	data, publicKey := signedNodeCatalogForTest(t)
+	privateKey := ed25519.NewKeyFromSeed([]byte(strings.Repeat("c", ed25519.SeedSize)))
+	var template NodeCatalogSnapshot
+	if err := json.Unmarshal(data, &template); err != nil {
+		t.Fatal(err)
+	}
+	template.Models[0].Signature = "operator-supplied-value-is-replaced"
+	templateData, err := json.Marshal(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := SignNodeCatalogJSON(templateData, privateKey)
+	if err != nil {
+		t.Fatalf("sign catalog: %v", err)
+	}
+	snapshot, err := parseNodeCatalog(signed, publicKey)
+	if err != nil {
+		t.Fatalf("verify signed catalog: %v", err)
+	}
+	if snapshot.Version != nodeCatalogTestVersion || len(snapshot.Models) != 1 || snapshot.Models[0].Signature == "" {
+		t.Fatalf("unexpected signed catalog: %+v", snapshot)
+	}
+	if !bytes.HasSuffix(signed, []byte("\n")) {
+		t.Fatal("signed catalog output is not newline-terminated")
+	}
+}
+
+func TestSignNodeCatalogJSONRejectsMalformedOrAmbiguousInput(t *testing.T) {
+	data, _ := signedNodeCatalogForTest(t)
+	privateKey := ed25519.NewKeyFromSeed([]byte(strings.Repeat("c", ed25519.SeedSize)))
+	cases := [][]byte{
+		[]byte(`{"version":"00000000-0000-4000-8000-000000000002","version":"00000000-0000-4000-8000-000000000002","models":[]}`),
+		[]byte(strings.Replace(string(data), `"version":"`+nodeCatalogTestVersion+`"`, `"version":"`+nodeCatalogTestVersion+`","unexpected":true`, 1)),
+	}
+	for i, input := range cases {
+		if _, err := SignNodeCatalogJSON(input, privateKey); err == nil {
+			t.Fatalf("malformed catalog template %d was signed", i)
+		}
+	}
+	if _, err := SignNodeCatalogJSON(data, ed25519.PrivateKey([]byte("short"))); err == nil {
+		t.Fatal("invalid signing key was accepted")
+	}
+}
+
+func TestSignNodeCatalogSnapshotRejectsDuplicateModelIDs(t *testing.T) {
+	data, _ := signedNodeCatalogForTest(t)
+	var snapshot NodeCatalogSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Models = append(snapshot.Models, snapshot.Models[0])
+	privateKey := ed25519.NewKeyFromSeed([]byte(strings.Repeat("c", ed25519.SeedSize)))
+	if _, err := SignNodeCatalogSnapshot(snapshot, privateKey); err == nil {
+		t.Fatal("duplicate model IDs were signed")
+	}
+}
+
 func TestParseNodeCatalogRejectsMalformedCatalogs(t *testing.T) {
 	data, publicKey := signedNodeCatalogForTest(t)
 	var snapshot NodeCatalogSnapshot
