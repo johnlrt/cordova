@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -64,6 +65,8 @@ const DefaultPrivacyNoticeVersion = "privacy-v1"
 type Store struct {
 	redis           *redis.Client
 	cfg             Config
+	nodeMu          sync.Mutex
+	nodes           *nodeService
 	argonSlots      chan struct{}
 	usagePendingKey string
 }
@@ -148,7 +151,15 @@ func NewStore(client *redis.Client, cfg Config) (*Store, error) {
 	if cfg.UsagePendingKey == "" {
 		cfg.UsagePendingKey = billing.DefaultUsagePendingKey
 	}
-	return &Store{redis: client, cfg: cfg, argonSlots: make(chan struct{}, 4), usagePendingKey: cfg.UsagePendingKey}, nil
+	store := &Store{redis: client, cfg: cfg, argonSlots: make(chan struct{}, 4), usagePendingKey: cfg.UsagePendingKey}
+	if len(cfg.NodeSecretEncryptionKey) > 0 || len(cfg.NodeJWTSigningKey) > 0 {
+		nodes, err := newNodeService(client, cfg)
+		if err != nil {
+			return nil, err
+		}
+		store.nodes = nodes
+	}
+	return store, nil
 }
 
 // Claim implements the C2 client idempotency mapping. The client key and

@@ -105,6 +105,27 @@ func newNodeService(client *redis.Client, cfg Config) (*nodeService, error) {
 		keyID: hex.EncodeToString(keyDigest[:8]), peers: make(map[string]*nodePeer)}, nil
 }
 
+func (s *Store) ensureNodeService(cfg Config) (*nodeService, error) {
+	if s == nil {
+		return nil, errors.New("M1 store is required for the node service")
+	}
+	s.nodeMu.Lock()
+	defer s.nodeMu.Unlock()
+	if s.nodes == nil {
+		nodes, err := newNodeService(s.redis, cfg)
+		if err != nil {
+			return nil, err
+		}
+		s.nodes = nodes
+		return nodes, nil
+	}
+	if s.nodes.origin != strings.TrimRight(cfg.Origin, "/") || !hmac.Equal(s.nodes.pepper, cfg.Pepper) ||
+		!hmac.Equal(s.nodes.encryption, cfg.NodeSecretEncryptionKey) || !hmac.Equal(s.nodes.signingKey, cfg.NodeJWTSigningKey) {
+		return nil, errors.New("node service configuration differs from the M1 store")
+	}
+	return s.nodes, nil
+}
+
 func (s *nodeService) verifier(purpose, value string) string {
 	mac := hmac.New(sha256.New, s.pepper)
 	_, _ = mac.Write([]byte(purpose + "\n" + value))

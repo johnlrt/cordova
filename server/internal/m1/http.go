@@ -79,7 +79,7 @@ func newHandler(cfg Config, store *Store, provider inference.Provider, executor 
 	}
 	h := &Handler{store: store, cfg: cfg, catalog: catalog, ledger: ledger, authenticate: store.Authenticate, requests: requests}
 	if len(cfg.NodeSecretEncryptionKey) > 0 || len(cfg.NodeJWTSigningKey) > 0 {
-		h.nodes, err = newNodeService(store.redis, cfg)
+		h.nodes, err = store.ensureNodeService(cfg)
 		if err != nil {
 			return nil, err
 		}
