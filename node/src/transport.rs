@@ -1542,7 +1542,7 @@ async fn wait_for_shutdown() {
 }
 
 #[cfg(test)]
-mod socks5h_tests {
+mod transport_tests {
     use super::*;
 
     #[tokio::test]
@@ -1706,6 +1706,50 @@ mod socks5h_tests {
             proxy.await.expect("proxy task"),
             ("node.invalid".to_owned(), 443)
         );
+    }
+
+    #[tokio::test]
+    async fn unauthorized_websocket_handshake_is_terminal_auth_rejection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local WebSocket test server");
+        let address = listener.local_addr().expect("server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept WebSocket client");
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .expect("reject WebSocket authentication");
+        });
+        let target = Url::parse(&format!("ws://{address}/api/node/ws")).expect("target URL");
+
+        let result = open_socket(&Config::default(), target, "test-access-token").await;
+        server.await.expect("WebSocket test server task");
+
+        assert!(matches!(result, Err(NodeError::AuthenticationRejected)));
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_websocket_close_is_terminal_auth_rejection() {
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let outbound = OutboundSender {
+            tx,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+        let close = Message::Close(Some(CloseFrame {
+            code: CloseCode::Policy,
+            reason: "unauthenticated".into(),
+        }));
+        let mut stream = futures_util::stream::iter([Ok(close)]);
+
+        let result = receive_envelope(&mut stream, &outbound).await;
+
+        assert!(matches!(result, Err(NodeError::AuthenticationRejected)));
     }
 
     #[tokio::test]

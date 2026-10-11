@@ -233,7 +233,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - **BN3 (B1/B2):** Build auth, gateway and mock-node SSE slice. **Done when:** `make smoke` returns the shared completion/usage flow through nginx and Kafka.
 - **BN4 (B4/B7):** Begin independent Rust transport and Redis ledger queues. **Done when:** narrow transport/replay and balance/conservation tests pass before real money integration.
 - **BN5 (B3, partial):** The authenticated helper now has a supervised llama.cpp runtime and command. Still required: a pinned and packaged runner/model, real token/template parity, chunk-boundary whole-text accounting, and the full `make test-tokenizer-parity` gate.
-- **BN6 (B4, partial):** Add deterministic SOCKS5h remote-DNS, credential-handshake, and no-direct-fallback tests. The node now classifies permanent auth rejection separately from retryable rate limits/service errors at HTTP auth, WebSocket handshake, and an immediate `unauthenticated` WS close/error; this code still needs CI confirmation. Still required: verify OS credential-store behavior, reconnect and revoked/stale auth fault evidence, and supported-OS transport smoke.
+- **BN6 (B4, partial):** Add deterministic SOCKS5h remote-DNS, credential-handshake, and no-direct-fallback tests. The node classifies permanent auth rejection separately from retryable rate limits/service errors at HTTP auth, WebSocket handshake, and an immediate `unauthenticated` WS close/error; Linux CI passed for commit `af459c0`. The working tree adds direct tests for a 401 WebSocket handshake and an `unauthenticated` close frame, and expands `make test-node-transport` to run the full locked Rust workspace; these new tests are awaiting CI. Still required: verify OS credential-store behavior, reconnect and revoked/stale auth fault evidence, and supported-OS transport smoke.
 
 ## Changelog
 
@@ -244,6 +244,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - v5, 2026-10-11: Add focused node SOCKS5h tests and a `make test-node-transport` target; B4's reconnect, credential-store and cross-platform gates remain open.
 - v6, 2026-10-11: Cover the SOCKS5 username/password handshake with synthetic credentials; the OS credential-store and end-to-end transport gates remain open.
 - v7, 2026-10-11: Stop retrying node authentication after permanent rejection at challenge/token, WebSocket handshake, or immediate unauthorized session close; preserve backoff for rate limits and server failures. CI and fault evidence remain pending.
+- v8, 2026-10-11: Add direct WebSocket handshake/close rejection tests and make the transport test target execute the locked node workspace. CI for these additions is pending; OS credential-store, reconnect-fault and cross-platform smoke gates remain open.
 
 ## Open risks
 
