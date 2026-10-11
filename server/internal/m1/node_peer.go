@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"cordova/server/internal/domain"
 
@@ -36,19 +37,22 @@ type nodePeer struct {
 }
 
 type nodeExchange struct {
-	peer      *nodePeer
-	requestID string
-	events    chan nodeWireEnvelope
-	once      sync.Once
-	kind      string
-	modelID   string
-	commandID string
-	operation string
-	attemptID string
-	leaseID   string
-	accepted  bool
-	nextChunk uint32
-	terminal  bool
+	peer                 *nodePeer
+	requestID            string
+	events               chan nodeWireEnvelope
+	once                 sync.Once
+	kind                 string
+	modelID              string
+	commandID            string
+	operation            string
+	attemptID            string
+	leaseID              string
+	accepted             bool
+	nextChunk            uint32
+	benchmarkID          string
+	benchmarkLeases      map[uint32]string
+	nextBenchmarkChunk   map[uint32]uint32
+	terminal             bool
 }
 
 func newNodePeer(conn *websocket.Conn, identity nodeIdentity, sessionID string, nextSequence uint32) *nodePeer {
@@ -123,6 +127,32 @@ func newNodeExchange(peer *nodePeer, requestID, typ string, payload any) (*nodeE
 		exchange.attemptID, exchange.leaseID = readText("attempt_id"), readText("lease_id")
 		if !validID(exchange.attemptID) || !validID(exchange.leaseID) {
 			return nil, ErrNodeSessionUnavailable
+		}
+	case "benchmark.start":
+		var challenge nodeBenchmarkStartPayload
+		if decodeStrictBytes(encoded, &challenge) != nil || !validID(challenge.BenchmarkID) ||
+			!validModelSlug(challenge.ModelID) || !validID(challenge.CatalogVersion) || challenge.MaxTokens != 256 ||
+			challenge.RequiredConcurrency == 0 || challenge.RequiredConcurrency > 64 ||
+			uint32(len(challenge.Leases)) != challenge.RequiredConcurrency || !validBenchmarkTokenIDs(challenge.InputTokenIDs) ||
+			challenge.Seed > 2_147_483_647 {
+			return nil, ErrNodeSessionUnavailable
+		}
+		if _, err := time.Parse(time.RFC3339Nano, challenge.DeadlineAt); err != nil {
+			return nil, ErrNodeSessionUnavailable
+		}
+		exchange.benchmarkID = challenge.BenchmarkID
+		exchange.benchmarkLeases = make(map[uint32]string, len(challenge.Leases))
+		exchange.nextBenchmarkChunk = make(map[uint32]uint32, len(challenge.Leases))
+		for index, lease := range challenge.Leases {
+			if lease.SlotIndex != uint32(index) || !validID(lease.LeaseID) {
+				return nil, ErrNodeSessionUnavailable
+			}
+			for _, existing := range exchange.benchmarkLeases {
+				if existing == lease.LeaseID {
+					return nil, ErrNodeSessionUnavailable
+				}
+			}
+			exchange.benchmarkLeases[lease.SlotIndex] = lease.LeaseID
 		}
 	default:
 		return nil, ErrNodeSessionUnavailable
@@ -346,6 +376,37 @@ func (e *nodeExchange) accept(frame nodeWireEnvelope) bool {
 		}
 		e.terminal = true
 		return true
+	case "benchmark.start":
+		switch frame.Type {
+		case "benchmark.delta":
+			var payload nodeBenchmarkDeltaPayload
+			if e.terminal || decodeNodePayload(frame.Payload, &payload, "benchmark_id", "slot_index", "lease_id", "chunk_index", "text") != nil ||
+				payload.BenchmarkID != e.benchmarkID || e.benchmarkLeases[payload.SlotIndex] != payload.LeaseID ||
+				payload.ChunkIndex != e.nextBenchmarkChunk[payload.SlotIndex] || payload.ChunkIndex == ^uint32(0) {
+				return false
+			}
+			e.nextBenchmarkChunk[payload.SlotIndex]++
+			return true
+		case "benchmark.result":
+			var payload nodeBenchmarkResultPayload
+			if e.terminal || decodeNodePayload(frame.Payload, &payload, "benchmark_id", "slots", "reported_peak_vram_bytes", "completed_slots") != nil ||
+				payload.BenchmarkID != e.benchmarkID || len(payload.Slots) != len(e.benchmarkLeases) ||
+				payload.CompletedSlots != uint32(len(e.benchmarkLeases)) {
+				return false
+			}
+			seen := make(map[uint32]bool, len(payload.Slots))
+			for _, slot := range payload.Slots {
+				if seen[slot.SlotIndex] || e.benchmarkLeases[slot.SlotIndex] != slot.LeaseID ||
+					slot.ClaimedOutputTokens > 256 || (slot.FinishReason != "stop" && slot.FinishReason != "length") {
+					return false
+				}
+				seen[slot.SlotIndex] = true
+			}
+			e.terminal = true
+			return true
+		default:
+			return false
+		}
 	default:
 		return false
 	}
@@ -465,6 +526,29 @@ func validateNodeReply(frame nodeWireEnvelope) error {
 			!validID(payload.AttemptID) || !validID(payload.LeaseID) || (payload.FinishReason != "stop" && payload.FinishReason != "length") ||
 			payload.ClaimedInputTokens > 1_000_000 || payload.ClaimedOutputTokens > 1_000_000 {
 			return errors.New("node inference completion is invalid")
+		}
+	case "benchmark.delta":
+		var payload nodeBenchmarkDeltaPayload
+		if decodeNodePayload(frame.Payload, &payload, "benchmark_id", "slot_index", "lease_id", "chunk_index", "text") != nil ||
+			!validID(payload.BenchmarkID) || payload.SlotIndex > 63 || !validID(payload.LeaseID) ||
+			len(payload.Text) == 0 || len(payload.Text) > 16<<10 || !validNodeText(payload.Text, 16<<10) {
+			return errors.New("node benchmark delta is invalid")
+		}
+	case "benchmark.result":
+		var payload nodeBenchmarkResultPayload
+		if decodeNodePayload(frame.Payload, &payload, "benchmark_id", "slots", "reported_peak_vram_bytes", "completed_slots") != nil ||
+			!validID(payload.BenchmarkID) || len(payload.Slots) == 0 || len(payload.Slots) > 64 ||
+			payload.CompletedSlots != uint32(len(payload.Slots)) {
+			return errors.New("node benchmark result is invalid")
+		}
+		seenSlots := make(map[uint32]bool, len(payload.Slots))
+		seenLeases := make(map[string]bool, len(payload.Slots))
+		for _, slot := range payload.Slots {
+			if slot.SlotIndex > 63 || seenSlots[slot.SlotIndex] || !validID(slot.LeaseID) || seenLeases[slot.LeaseID] ||
+				slot.ClaimedOutputTokens > 256 || (slot.FinishReason != "stop" && slot.FinishReason != "length") {
+				return errors.New("node benchmark result is invalid")
+			}
+			seenSlots[slot.SlotIndex], seenLeases[slot.LeaseID] = true, true
 		}
 	case "error":
 		var payload struct {
