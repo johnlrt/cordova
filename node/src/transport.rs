@@ -1526,3 +1526,106 @@ async fn wait_for_shutdown() {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
+
+#[cfg(test)]
+mod socks5h_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn socks5h_sends_hostname_to_proxy_without_local_resolution() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local SOCKS test proxy");
+        let proxy_address = listener.local_addr().expect("proxy address");
+        let proxy = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept SOCKS client");
+            let mut hello = [0u8; 3];
+            stream
+                .read_exact(&mut hello)
+                .await
+                .expect("read SOCKS greeting");
+            assert_eq!(hello, [5, 1, 0]);
+            stream
+                .write_all(&[5, 0])
+                .await
+                .expect("select no-auth mode");
+
+            let mut header = [0u8; 4];
+            stream
+                .read_exact(&mut header)
+                .await
+                .expect("read SOCKS connect header");
+            assert_eq!(header, [5, 1, 0, 3], "target must be sent as a domain name");
+            let mut name_length = [0u8; 1];
+            stream
+                .read_exact(&mut name_length)
+                .await
+                .expect("read target name length");
+            let mut name = vec![0u8; usize::from(name_length[0])];
+            stream
+                .read_exact(&mut name)
+                .await
+                .expect("read unresolved target name");
+            let mut port = [0u8; 2];
+            stream
+                .read_exact(&mut port)
+                .await
+                .expect("read target port");
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 1])
+                .await
+                .expect("return successful SOCKS tunnel");
+            (
+                String::from_utf8(name).expect("valid target hostname"),
+                u16::from_be_bytes(port),
+            )
+        });
+
+        let stream = TcpStream::connect(proxy_address)
+            .await
+            .expect("connect to local SOCKS test proxy");
+        let tunnel = socks5_connect(stream, "node.invalid", 443, None, None)
+            .await
+            .expect("SOCKS5h tunnel should be established");
+        drop(tunnel);
+
+        assert_eq!(
+            proxy.await.expect("proxy task"),
+            ("node.invalid".to_owned(), 443),
+            "the proxy must receive the hostname and perform DNS resolution"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_socks5h_proxy_does_not_fall_back_to_direct_connection() {
+        let direct_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind direct-fallback sentinel");
+        let direct_address = direct_listener.local_addr().expect("sentinel address");
+        let proxy_reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve unavailable proxy port");
+        let proxy_address = proxy_reservation
+            .local_addr()
+            .expect("reserved proxy address");
+        drop(proxy_reservation);
+
+        let config = Config {
+            proxy: Some(format!("socks5h://{proxy_address}")),
+            ..Config::default()
+        };
+        let target = Url::parse(&format!("ws://{direct_address}/api/node/ws")).expect("target URL");
+        let error = match open_socket(&config, target, "test-access-token").await {
+            Err(NodeError::WebSocket(message)) => message,
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(_) => panic!("connection unexpectedly succeeded"),
+        };
+        assert!(error.contains("direct fallback is disabled"));
+        assert!(
+            timeout(Duration::from_millis(100), direct_listener.accept())
+                .await
+                .is_err(),
+            "direct target accepted a connection after proxy failure"
+        );
+    }
+}
