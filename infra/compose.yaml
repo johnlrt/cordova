@@ -41,7 +41,8 @@ services:
         condition: service_healthy
     networks: [private]
     read_only: true
-    tmpfs: [/tmp]
+    # Kafka's bundled Snappy JNI library is extracted to /tmp and must be loadable.
+    tmpfs: [/tmp:rw,nosuid,nodev,exec,mode=1777,size=64m]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 128

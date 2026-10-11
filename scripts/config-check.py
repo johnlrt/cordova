@@ -49,6 +49,14 @@ def main() -> int:
         }
         if any(str(kafka_environment.get(key, "")) != value for key, value in required_kafka_settings.items()):
             fail("Kafka must run private KRaft with authenticated clients, explicit ACLs and topic auto-creation disabled")
+        kafka_tmpfs = services["kafka"].get("tmpfs", [])
+        if not any(
+            isinstance(mount, str)
+            and mount.startswith("/tmp:")
+            and "exec" in mount.split(":", 1)[1].split(",")
+            for mount in kafka_tmpfs
+        ):
+            fail("Kafka /tmp must allow loading its bundled Snappy JNI library")
         topic_init = services["usage-topic-init"]
         topic_command = topic_init.get("command", [])
         required_topic_steps = [
