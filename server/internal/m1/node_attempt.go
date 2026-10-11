@@ -18,6 +18,7 @@ type nodeInferenceAttempt struct {
 	catalogVersion string
 	attemptID      string
 	leaseID        string
+	deadline       time.Time
 	releaseLease   func(context.Context)
 }
 
@@ -56,9 +57,14 @@ func (a *nodeInferenceAttempt) RunAccepted(ctx context.Context, input inference.
 			return "", request.ErrInvalidRequest
 		}
 	}
-	deadline := time.Now().UTC().Add(120 * time.Second)
+	deadline := time.Now().UTC().Add(maxNodeLeaseLifetime)
+	if !a.deadline.IsZero() && a.deadline.Before(deadline) {
+		deadline = a.deadline
+	}
 	if supplied, ok := ctx.Deadline(); ok {
-		deadline = supplied.UTC()
+		if supplied.Before(deadline) {
+			deadline = supplied.UTC()
+		}
 	}
 	if !deadline.After(time.Now()) {
 		return "", context.DeadlineExceeded

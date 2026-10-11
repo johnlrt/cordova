@@ -123,13 +123,17 @@ func (s *nodeService) establishSession(ctx context.Context, identity nodeIdentit
 local node_type=redis.call('TYPE',KEYS[1]).ok
 local generation_type=redis.call('TYPE',KEYS[2]).ok
 local session_type=redis.call('TYPE',KEYS[3]).ok
-if node_type~='string' or (generation_type~='none' and generation_type~='string') or (session_type~='none' and session_type~='string') then return redis.error_reply('node session key type mismatch') end
+local leases_type=redis.call('TYPE',KEYS[5]).ok
+local details_type=redis.call('TYPE',KEYS[6]).ok
+if node_type~='string' or (generation_type~='none' and generation_type~='string') or (session_type~='none' and session_type~='string') or
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node session key type mismatch') end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(node)~='table' or node['id']~=ARGV[1] or node['owner_id']~=ARGV[2] or node['secret_version']~=tonumber(ARGV[3]) or node['revoked']~=false then return false end
 local generation=redis.call('INCR',KEYS[2])
 redis.call('SET',KEYS[3],ARGV[4]..':'..generation,'EX',ARGV[5])
-redis.call('DEL',KEYS[4])
-return generation`, []string{nodeRecordKey(identity.NodeID), nodeGenerationKey(identity.NodeID), nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID)},
+redis.call('DEL',KEYS[4],KEYS[5],KEYS[6])
+return generation`, []string{nodeRecordKey(identity.NodeID), nodeGenerationKey(identity.NodeID), nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID),
+		nodeLeaseIndexKey(identity.NodeID), nodeLeaseDetailsKey(identity.NodeID)},
 		identity.NodeID, identity.OwnerID, identity.SecretVersion, sessionID, int64(time.Until(expires).Seconds())).Int64()
 	if err != nil {
 		return 0, err
@@ -215,12 +219,17 @@ return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.Node
 func (s *nodeService) clearNodeSession(ctx context.Context, identity nodeIdentity, sessionID string) error {
 	return s.redis.Eval(ctx, `
 local session_type=redis.call('TYPE',KEYS[1]).ok
-if session_type~='none' and session_type~='string' then return redis.error_reply('node session key type mismatch') end
+local heartbeat_type=redis.call('TYPE',KEYS[2]).ok
+local leases_type=redis.call('TYPE',KEYS[3]).ok
+local details_type=redis.call('TYPE',KEYS[4]).ok
+if (session_type~='none' and session_type~='string') or (heartbeat_type~='none' and heartbeat_type~='string') or
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node session key type mismatch') end
 if redis.call('GET',KEYS[1])==ARGV[1]..':'..ARGV[2] then
-  redis.call('DEL',KEYS[1],KEYS[2])
+  redis.call('DEL',KEYS[1],KEYS[2],KEYS[3],KEYS[4])
   return 1
 end
-return 0`, []string{nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID)}, sessionID, identity.Generation).Err()
+return 0`, []string{nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID), nodeLeaseIndexKey(identity.NodeID),
+		nodeLeaseDetailsKey(identity.NodeID)}, sessionID, identity.Generation).Err()
 }
 
 func (h *Handler) nodeWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -445,10 +454,19 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 			if decodeNodePayload(frame.Payload, &heartbeat, "active_leases", "hardware", "models") != nil ||
 				decodeNodePayload(nodeObjectField(frame.Payload, "hardware"), &heartbeat.Hardware, "platform", "arch", "backend", "gpu_name", "reported_total_vram_bytes", "reported_free_vram_bytes", "ram_bytes") != nil ||
 				decodeNodeModels(nodeObjectField(frame.Payload, "models"), &heartbeat.Models) != nil ||
-				!validNodeIDArray(nodeObjectField(frame.Payload, "active_leases")) || len(heartbeat.ActiveLeases) != 0 ||
+				!validNodeIDArray(nodeObjectField(frame.Payload, "active_leases")) ||
 				!validNodeHardware(heartbeat.Hardware) || !validNodeModels(heartbeat.Models) {
-				peer.sendError(nullableUUID(frame.RequestID), "heartbeat", "stale_lease", "The heartbeat contains unsupported active leases or invalid state.", false)
+				peer.sendError(nullableUUID(frame.RequestID), "heartbeat", "stale_lease", "The heartbeat contains invalid active leases or state.", false)
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid heartbeat")
+				return
+			}
+			if err := h.nodes.verifyReportedNodeLeases(ctx, identity, sessionID, heartbeat.ActiveLeases); err != nil {
+				if errors.Is(err, ErrNodeConflict) {
+					peer.sendError(nullableUUID(frame.RequestID), "heartbeat", "stale_lease", "The heartbeat reported an unknown or expired lease.", false)
+					nodeClose(conn, websocket.ClosePolicyViolation, "invalid active lease")
+				} else {
+					nodeClose(conn, websocket.CloseInternalServerErr, "unavailable")
+				}
 				return
 			}
 			lastHeartbeat = time.Now().UTC()
@@ -518,6 +536,16 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 				nodeClose(conn, websocket.ClosePolicyViolation, "invalid goodbye")
 				return
 			}
+			activeLeases, err := h.nodes.hasActiveNodeLeases(ctx, identity.NodeID, sessionID, identity.Generation)
+			if err != nil {
+				nodeClose(conn, websocket.CloseInternalServerErr, "unavailable")
+				return
+			}
+			if activeLeases {
+				peer.sendError(nullableUUID(frame.RequestID), "goodbye", "stale_lease", "The node cannot disconnect while server leases are active.", false)
+				nodeClose(conn, websocket.ClosePolicyViolation, "active server lease")
+				return
+			}
 			nodeClose(conn, websocket.CloseNormalClosure, "goodbye")
 			return
 		case "error":
@@ -583,6 +611,9 @@ func decodeNodeModels(raw json.RawMessage, target *[]nodeModelReport) error {
 func validNodeIDArray(raw json.RawMessage) bool {
 	var values []string
 	if len(raw) == 0 || isJSONNull(raw) || json.Unmarshal(raw, &values) != nil {
+		return false
+	}
+	if len(values) > maxReportedActiveLeases {
 		return false
 	}
 	seen := make(map[string]bool, len(values))

@@ -274,8 +274,11 @@ func (s *nodeService) revokeNode(ctx context.Context, accountID, nodeID string) 
 	result, err := s.redis.Eval(ctx, `
 local node_type=redis.call('TYPE',KEYS[1]).ok
 local index_type=redis.call('TYPE',KEYS[4]).ok
+local leases_type=redis.call('TYPE',KEYS[5]).ok
+local details_type=redis.call('TYPE',KEYS[6]).ok
 if node_type=='none' then return 0 end
-if node_type~='string' or (index_type~='none' and index_type~='zset') then return redis.error_reply('node revoke key type mismatch') end
+if node_type~='string' or (index_type~='none' and index_type~='zset') or
+   (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') then return redis.error_reply('node revoke key type mismatch') end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(node)~='table' or node['id']~=ARGV[1] or node['owner_id']~=ARGV[2] then return 0 end
 if node['revoked']~=true then
@@ -283,10 +286,10 @@ if node['revoked']~=true then
   node['secret_version']=(tonumber(node['secret_version']) or 0)+1
   redis.call('SET',KEYS[1],cjson.encode(node))
 end
-redis.call('DEL',KEYS[2],KEYS[3])
+redis.call('DEL',KEYS[2],KEYS[3],KEYS[5],KEYS[6])
 redis.call('ZREM',KEYS[4],ARGV[3])
 return 1`, []string{nodeRecordKey(nodeID), nodeSessionKey(nodeID), nodeHeartbeatKey(nodeID),
-		nodeOwnerIndexKey(accountID)}, nodeID, accountID, member).Int()
+		nodeOwnerIndexKey(accountID), nodeLeaseIndexKey(nodeID), nodeLeaseDetailsKey(nodeID)}, nodeID, accountID, member).Int()
 	if err != nil {
 		return err
 	}
