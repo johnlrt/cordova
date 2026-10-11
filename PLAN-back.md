@@ -235,7 +235,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - **BN5 (B3, partial):** The authenticated helper now has a supervised llama.cpp runtime and command. Still required: a pinned and packaged runner/model, real token/template parity, chunk-boundary whole-text accounting, and the full `make test-tokenizer-parity` gate.
 - **BN6 (B4, partial):** Add deterministic SOCKS5h remote-DNS, credential-handshake, and no-direct-fallback tests. The node classifies permanent auth rejection separately from retryable rate limits/service errors at HTTP auth, WebSocket handshake, and an immediate `unauthenticated` WS close/error. Linux CI passed for commit `8bd41d7`, including direct tests for a 401 WebSocket handshake and an `unauthenticated` close frame; `make test-node-transport` now runs the full locked Rust workspace. Still required: verify OS credential-store behavior, reconnect and revoked/stale auth fault evidence, and supported-OS transport smoke.
 - **BN7 (B8, partial):** Ranker persists content-free T01 claim-deviation and T03 same-model throughput review signals with seven-day event dedupe. Unit tests cover exact thresholds; Redis idempotency integration coverage is gated on `CORDOVA_TEST_REDIS_URL`. Still required: canaries and A11 samples, corroboration, operator audit and earnings hold/release.
-- **BN8 (B8, partial):** Add a randomized arithmetic JSON property-canary challenge/evaluator and the C7 `node.canary` envelope; ranker stores failed checks as metadata-only T02 review signals. Still required: A19 funded daily scheduling, quarantine/review actions, canary false-positive tests through the live node protocol, and A11 sampling.
+- **BN8 (B8, partial):** Add a randomized arithmetic JSON property-canary challenge/evaluator and the C7 `node.canary` envelope; ranker stores failed checks as metadata-only T02 review signals. The A19 exact-integer budget policy now chooses a funded operator seed before daily inference revenue and a 5% gross-revenue cap afterward. Still required: source verified funding/revenue from the ledger, atomically reserve and settle budget in the durable journal, schedule funded canaries, quarantine/review actions, live-protocol false-positive tests, and A11 sampling.
 
 ## Changelog
 
@@ -252,6 +252,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 - v11, 2026-10-11: Publish account-scoped C4 node invalidations for owner lifecycle mutations, node session start/close, heartbeats and model-state changes, and pass node events through the live gateway. A Redis-backed integration assertion is added; the current shell has no Go or Redis runtime, so the assertion and hosted CI still need execution.
 - v12, 2026-10-11: Add T01 claim-deviation tolerance and T03 per-slot benchmark throughput review signals; raw prompt/response content is excluded and signals do not impose automatic penalties.
 - v13, 2026-10-11: Define a randomized versioned arithmetic property-canary evaluator and the metadata-only C7 T02 result/review-signal path; daily execution remains gated on A19 funding.
+- v14, 2026-10-11: Add the exact piconero A19 budget policy for seed-versus-revenue caps and exhausted-budget handling; durable funding inputs and atomic reservations remain pending.
 
 ## Open risks
 
