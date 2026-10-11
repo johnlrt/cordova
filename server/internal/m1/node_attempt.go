@@ -20,6 +20,8 @@ type nodeInferenceAttempt struct {
 	leaseID        string
 	deadline       time.Time
 	releaseLease   func(context.Context)
+	claimedInput   *uint32
+	claimedOutput  *uint32
 }
 
 func newNodeInferenceAttempt(nodes *nodeService, nodeID, modelID, catalogVersion, attemptID, leaseID string,
@@ -34,6 +36,8 @@ func newNodeInferenceAttempt(nodes *nodeService, nodeID, modelID, catalogVersion
 
 var _ request.Attempt = (*nodeInferenceAttempt)(nil)
 var _ request.AcceptedAttempt = (*nodeInferenceAttempt)(nil)
+var _ request.OutcomeReporter = (*nodeInferenceAttempt)(nil)
+var _ request.OutputClaimAuditor = (*nodeInferenceAttempt)(nil)
 
 func (a *nodeInferenceAttempt) OwnerID() string { return a.nodeID }
 
@@ -133,9 +137,14 @@ func (a *nodeInferenceAttempt) RunAccepted(ctx context.Context, input inference.
 				InputTokens  uint32  `json:"claimed_input_tokens"`
 				OutputTokens uint32  `json:"claimed_output_tokens"`
 			}
-			if !acceptedSeen || decodeNodePayload(frame.Payload, &complete, "attempt_id", "lease_id", "last_chunk_index", "finish_reason", "claimed_input_tokens", "claimed_output_tokens") != nil ||
-				complete.AttemptID != a.attemptID || complete.LeaseID != a.leaseID ||
-				complete.InputTokens != uint32(input.InputTokens) || complete.FinishReason != "stop" && complete.FinishReason != "length" {
+			if !acceptedSeen || decodeNodePayload(frame.Payload, &complete, "attempt_id", "lease_id", "last_chunk_index", "finish_reason", "claimed_input_tokens", "claimed_output_tokens") != nil {
+				return "", request.ErrNodeFailed
+			}
+			claimedInput, claimedOutput := complete.InputTokens, complete.OutputTokens
+			a.claimedInput, a.claimedOutput = &claimedInput, &claimedOutput
+			if complete.AttemptID != a.attemptID || complete.LeaseID != a.leaseID ||
+				complete.InputTokens != uint32(input.InputTokens) || complete.OutputTokens > uint32(input.MaxTokens) ||
+				complete.FinishReason != "stop" && complete.FinishReason != "length" {
 				return "", request.ErrNodeFailed
 			}
 			return complete.FinishReason, nil
@@ -145,6 +154,28 @@ func (a *nodeInferenceAttempt) RunAccepted(ctx context.Context, input inference.
 			return "", request.ErrNodeFailed
 		}
 	}
+}
+
+func (a *nodeInferenceAttempt) OutputClaims() (*uint32, *uint32) {
+	if a == nil {
+		return nil, nil
+	}
+	return a.claimedInput, a.claimedOutput
+}
+
+func (a *nodeInferenceAttempt) RecordOutcome(ctx context.Context, report request.OutcomeReport) error {
+	if a == nil || a.nodes == nil || !validID(report.RequestID) || !validID(report.AttemptID) ||
+		report.ModelID != a.modelID || (report.Outcome != "success" && report.Outcome != "failure" && report.Outcome != "cancelled") ||
+		report.ElapsedMS == 0 || report.ElapsedMS > 120_000 || report.VerifiedOutputTokens > 1_000_000 ||
+		(report.FirstTokenMS != nil && *report.FirstTokenMS > report.ElapsedMS) {
+		return request.ErrInvalidRequest
+	}
+	payload := map[string]any{
+		"model_id": report.ModelID, "outcome": report.Outcome, "elapsed_ms": report.ElapsedMS,
+		"first_token_ms": report.FirstTokenMS, "verified_output_tokens": report.VerifiedOutputTokens,
+		"claim_deviation": report.ClaimDeviation,
+	}
+	return a.nodes.appendNodeEvent(ctx, a.nodeID, "node.request_outcome", &report.RequestID, &report.AttemptID, payload)
 }
 
 func (a *nodeInferenceAttempt) Release(ctx context.Context) {

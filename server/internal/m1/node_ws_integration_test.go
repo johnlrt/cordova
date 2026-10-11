@@ -58,7 +58,14 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cleanCancel()
 		_ = client.Del(cleanCtx, nodeRecordKey(node.ID), nodeSessionKey(node.ID), nodeGenerationKey(node.ID), nodeHeartbeatKey(node.ID),
-			nodeRevisionKey(node.ID), nodeModelStateKey(node.ID, "cordova-chat-small-v1"), accountLiveKey(ownerID.String())).Err()
+			nodeRevisionKey(node.ID), nodeModelStateKey(node.ID, "cordova-chat-small-v1"), accountLiveKey(ownerID.String()),
+			nodeEventSequenceKey(node.ID)).Err()
+		entries, _ := client.XRange(cleanCtx, nodeEventsOutbox, "-", "+").Result()
+		for _, entry := range entries {
+			if eventNodeID, ok := entry.Values["node_id"].(string); ok && eventNodeID == node.ID {
+				_ = client.XDel(cleanCtx, nodeEventsOutbox, entry.ID).Err()
+			}
+		}
 	})
 	api, err := NewHandler(config, store, inference.Mock{})
 	if err != nil {

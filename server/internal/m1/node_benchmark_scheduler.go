@@ -52,6 +52,8 @@ type nodeBenchmarkTrial struct {
 	benchmarkID          string
 	firstToken           uint64
 	tokensPerSecondMilli uint64
+	verifiedOutputTokens uint32
+	elapsedMS            uint32
 }
 
 func newNodeBenchmarkScheduler(nodes *nodeService, controller *nodeModelController, catalog NodeCatalogSnapshot,
@@ -163,6 +165,9 @@ func (s *nodeBenchmarkScheduler) calibrate(ctx context.Context, nodeID string, m
 	}()
 
 	var best *nodeCapacityProfile
+	var lastValidTrial *nodeBenchmarkTrial
+	var lastValidCapacity uint64
+	var lastValidSlots uint32
 	failedBaseline := false
 	for concurrency := uint32(1); concurrency <= maxSlots; concurrency++ {
 		if ctx.Err() != nil {
@@ -190,6 +195,9 @@ func (s *nodeBenchmarkScheduler) calibrate(ctx context.Context, nodeID string, m
 			}
 			break
 		}
+		lastValidTrial = &trial
+		lastValidCapacity = footprint
+		lastValidSlots = concurrency
 		if trial.firstToken > 30_000 || trial.tokensPerSecondMilli < 2_000 {
 			if concurrency == 1 && !failedBaseline {
 				failedBaseline = true
@@ -204,9 +212,20 @@ func (s *nodeBenchmarkScheduler) calibrate(ctx context.Context, nodeID string, m
 			ExpiresAtUnix: now.Add(nodeCapacityProfileMaxAge).Unix(), BenchmarkPassed: true,
 			VerifiedSlots: concurrency, VerifiedCapacityBytes: footprint, Rank: 10,
 			FirstTokenLatencyMS:          trial.firstToken,
-			VerifiedTokensPerSecondMilli: trial.tokensPerSecondMilli}
+			VerifiedTokensPerSecondMilli: trial.tokensPerSecondMilli,
+			VerifiedOutputTokens:         trial.verifiedOutputTokens, BenchmarkElapsedMS: trial.elapsedMS}
 	}
 	if best == nil {
+		if lastValidTrial != nil {
+			if err := s.nodes.appendNodeEvent(ctx, nodeID, "node.benchmark", nil, nil, map[string]any{
+				"benchmark_id": lastValidTrial.benchmarkID, "model_id": manifest.Model.ID,
+				"tested_capacity_bytes": lastValidCapacity, "verified_slots": lastValidSlots,
+				"verified_output_tokens": lastValidTrial.verifiedOutputTokens, "elapsed_ms": lastValidTrial.elapsedMS,
+				"passed": false,
+			}); err != nil {
+				return err
+			}
+		}
 		return ErrNodeBenchmarkRejected
 	}
 	if err := s.nodes.renewNodeBenchmarkLock(ctx, nodeID, sessionID, manifest.Model.ID, lockID.String()); err != nil {
@@ -215,7 +234,12 @@ func (s *nodeBenchmarkScheduler) calibrate(ctx context.Context, nodeID string, m
 	if err := s.nodes.setVerifiedNodeCapacity(ctx, *best, sessionID, generation, lockID.String()); err != nil {
 		return err
 	}
-	return nil
+	return s.nodes.appendNodeEvent(ctx, nodeID, "node.benchmark", nil, nil, map[string]any{
+		"benchmark_id": best.BenchmarkID, "model_id": best.ModelID,
+		"tested_capacity_bytes": best.VerifiedCapacityBytes, "verified_slots": best.VerifiedSlots,
+		"verified_output_tokens": best.VerifiedOutputTokens, "elapsed_ms": best.BenchmarkElapsedMS,
+		"passed": true,
+	})
 }
 
 func (s *nodeBenchmarkScheduler) runTrial(ctx context.Context, nodeID string, manifest NodeCatalogManifest,
@@ -367,7 +391,7 @@ func (s *nodeBenchmarkScheduler) runTrial(ctx context.Context, nodeID string, ma
 	}
 	tokensPerSecondMilli := totalTokens * 1_000_000 / uint64(elapsedMS)
 	return nodeBenchmarkTrial{benchmarkID: benchmarkID.String(), firstToken: firstToken,
-		tokensPerSecondMilli: tokensPerSecondMilli}, true, nil
+		tokensPerSecondMilli: tokensPerSecondMilli, verifiedOutputTokens: uint32(totalTokens), elapsedMS: uint32(elapsedMS)}, true, nil
 }
 
 func releaseBenchmarkLeases(leases []*nodeSlotLease) {

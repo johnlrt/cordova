@@ -394,6 +394,7 @@ Prefix keys `cv:v1:`; one standalone primary supports cross-account scripts. Nev
 | `rank:<node>` / `rank-events:<node>` | Versioned rank hash / content-free Redis-arrival event stream, trimmed to 48h; `ranker-nodes` indexes node IDs for periodic recompute | Current / 48h |
 | `rank-sequence:<node>` / `ranker-event:<event_id>` / `ranker-session:<node>` | Last accepted source sequence / event dedupe marker / currently fenced session | Until node removal / 7d / current session |
 | `ranker-nodes` / `node-quarantine:<node>` | Set of node IDs with rank event history / operator-or-fraud quarantine marker | Remove index member on node removal / until quarantine release |
+| `outbox-sequence:node:<node>` / `outbox:node` | Per-node event sequence / durable validated node-event envelopes awaiting Kafka acknowledgement | Until node removal / until acknowledged |
 | `consumer-offset:<group>:<topic>:<partition>` / `outbox:rank` | Last atomically projected Kafka offset / durable rank-change events awaiting broker acknowledgement | Durable / until acknowledged |
 | `lease:<id>` / `node-leases:<id>` / `leases:due` | Session-bound attempt/load lease hash / set / deadline sorted set | Explicit release/reaper; no silent TTL-only removal |
 | `request:<id>` / `requests:active` / `account-requests:<id>` | Metadata state, attempts, price snapshot, counts, last operation; active set; timeline sorted set | Financial skeleton 5y; detailed metadata 30d |

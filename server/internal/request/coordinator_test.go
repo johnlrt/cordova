@@ -103,6 +103,28 @@ type mockAttempt struct {
 	receivedInput inference.Request
 }
 
+type reportingMockAttempt struct {
+	*mockAttempt
+	inputClaim  *uint32
+	outputClaim *uint32
+	report      OutcomeReport
+}
+
+type outcomeTestRouter struct{ attempt Attempt }
+
+func (r outcomeTestRouter) Acquire(context.Context, string, map[string]struct{}, time.Time) (Attempt, error) {
+	return r.attempt, nil
+}
+
+func (a *reportingMockAttempt) RecordOutcome(_ context.Context, report OutcomeReport) error {
+	a.report = report
+	return nil
+}
+
+func (a *reportingMockAttempt) OutputClaims() (*uint32, *uint32) {
+	return a.inputClaim, a.outputClaim
+}
+
 func (a *mockAttempt) OwnerID() string { return a.owner }
 func (a *mockAttempt) Run(_ context.Context, input inference.Request, emit func(string) error) (string, error) {
 	a.receivedInput = input
@@ -141,6 +163,37 @@ func TestCoordinatorSettlesNonStreamedOutputBeforeReturningAndStoresNoText(t *te
 	if err != nil || strings.Contains(string(encoded), "alpha") || strings.Contains(string(encoded), "beta") {
 		t.Fatalf("request content was persisted: err=%v", err)
 	}
+}
+
+func TestCoordinatorReportsOnlyServerMeasuredOutcomeMetadata(t *testing.T) {
+	_, coordinator, params, input, owner := setupCoordinator(t, wordTokenizer{}, "trusted input")
+	inputClaim, outputClaim := uint32(2), uint32(2)
+	attempt := &reportingMockAttempt{
+		mockAttempt: &mockAttempt{owner: owner, chunks: []string{"server ", "counted"}},
+		inputClaim:  &inputClaim, outputClaim: &outputClaim,
+	}
+	coordinator.router = outcomeTestRouter{attempt: attempt}
+	_, err := coordinator.Execute(context.Background(), params, input, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.report.RequestID != params.RequestID || attempt.report.ModelID != params.ModelID ||
+		attempt.report.Outcome != "success" || attempt.report.ElapsedMS == 0 || attempt.report.FirstTokenMS == nil ||
+		attempt.report.VerifiedOutputTokens != 2 || attempt.report.ClaimDeviation {
+		t.Fatalf("unexpected node outcome report: %+v", attempt.report)
+	}
+	if strings.Contains(string(mustMarshal(t, attempt.report)), "server") || strings.Contains(string(mustMarshal(t, attempt.report)), "trusted input") {
+		t.Fatal("node outcome report contains request or response content")
+	}
+}
+
+func mustMarshal(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func TestCoordinatorRetriesOnePreContentFailureOnDistinctOwner(t *testing.T) {

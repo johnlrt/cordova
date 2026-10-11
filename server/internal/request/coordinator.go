@@ -5,6 +5,7 @@ package request
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -71,6 +72,27 @@ type Attempt interface {
 // before any content can be forwarded to a streaming client.
 type AcceptedAttempt interface {
 	RunAccepted(context.Context, inference.Request, func() error, func(string) error) (finishReason string, err error)
+}
+
+// OutcomeReporter accepts server-measured, content-free attempt metadata for
+// durable routing/fraud projections. Implementations may not receive text.
+type OutcomeReporter interface {
+	RecordOutcome(context.Context, OutcomeReport) error
+}
+
+type OutcomeReport struct {
+	RequestID            string
+	AttemptID            string
+	ModelID              string
+	Outcome              string
+	ElapsedMS            uint32
+	FirstTokenMS         *uint32
+	VerifiedOutputTokens uint32
+	ClaimDeviation       bool
+}
+
+type OutputClaimAuditor interface {
+	OutputClaims() (inputTokens, outputTokens *uint32)
 }
 
 type Params struct {
@@ -267,6 +289,42 @@ func (c *Coordinator) Execute(ctx context.Context, params Params, input inferenc
 				outcome.err = ErrNodeFailed
 			}
 		}
+		if reporter, ok := attempt.(OutcomeReporter); ok {
+			reportOutcome := "failure"
+			verifiedOutputTokens := outcome.outputTokens
+			if outcome.clientCancelled {
+				reportOutcome = "cancelled"
+				verifiedOutputTokens = outcome.acceptedTokens
+			} else if outcome.err == nil {
+				reportOutcome = "success"
+			}
+			claimDeviation := false
+			if auditor, ok := attempt.(OutputClaimAuditor); ok {
+				claimedInput, claimedOutput := auditor.OutputClaims()
+				claimDeviation = claimedInput != nil && uint64(*claimedInput) != uint64(inputTokens) ||
+					claimedOutput != nil && uint64(*claimedOutput) != uint64(verifiedOutputTokens)
+			}
+			var verified uint32
+			if verifiedOutputTokens > 0 {
+				if verifiedOutputTokens > int64(^uint32(0)) {
+					verified = ^uint32(0)
+				} else {
+					verified = uint32(verifiedOutputTokens)
+				}
+			}
+			reportCtx, reportCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			reportErr := reporter.RecordOutcome(reportCtx, OutcomeReport{
+				RequestID: params.RequestID, AttemptID: attemptID.String(), ModelID: params.ModelID,
+				Outcome: reportOutcome, ElapsedMS: outcome.elapsedMS, FirstTokenMS: outcome.firstTokenMS,
+				VerifiedOutputTokens: verified, ClaimDeviation: claimDeviation,
+			})
+			reportCancel()
+			if reportErr != nil {
+				// Ranking metadata never changes settlement semantics; a Redis outage
+				// will also prevent financial persistence and be surfaced there.
+				log.Printf("node outcome projection append failed for attempt %s", attemptID.String())
+			}
+		}
 		if outcome.clientCancelled {
 			settleCtx, settleCancel := financialContext(ctx)
 			_, settleErr := c.ledger.Settle(settleCtx, params.RequestID, attemptID.String(), outcome.acceptedTokens, true, time.Now().UTC())
@@ -344,11 +402,24 @@ type attemptOutcome struct {
 	outputTokens    int64
 	acceptedTokens  int64
 	clientCancelled bool
+	elapsedMS       uint32
+	firstTokenMS    *uint32
 	err             error
 }
 
 func (c *Coordinator) runAttempt(ctx context.Context, modelID string, input inference.Request, stream bool,
 	emit func(string) error, onAccepted func() error, attempt Attempt) (out attemptOutcome) {
+	startedAt := time.Now()
+	defer func() {
+		elapsed := time.Since(startedAt).Milliseconds()
+		if elapsed < 1 {
+			elapsed = 1
+		}
+		if elapsed > 120_000 {
+			elapsed = 120_000
+		}
+		out.elapsedMS = uint32(elapsed)
+	}()
 	defer release(attempt)
 	var generated strings.Builder
 	var acceptedText strings.Builder
@@ -364,6 +435,17 @@ func (c *Coordinator) runAttempt(ctx context.Context, modelID string, input infe
 		}
 		if chunk == "" {
 			return nil
+		}
+		if out.firstTokenMS == nil {
+			firstToken := time.Since(startedAt).Milliseconds()
+			if firstToken < 0 {
+				firstToken = 0
+			}
+			if firstToken > 120_000 {
+				firstToken = 120_000
+			}
+			firstTokenMS := uint32(firstToken)
+			out.firstTokenMS = &firstTokenMS
 		}
 		if len(chunk) > maxDeltaBytes || !utf8.ValidString(chunk) || generated.Len()+len(chunk) > maxOutputBytes {
 			callbackErr = ErrOutputLimit

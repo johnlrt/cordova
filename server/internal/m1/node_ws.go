@@ -97,6 +97,7 @@ type nodeSessionHeartbeat struct {
 	SessionID string               `json:"session_id"`
 	NodeID    string               `json:"node_id"`
 	Received  string               `json:"received_at"`
+	LatencyMS uint64               `json:"latency_ms"`
 	Payload   nodeHeartbeatPayload `json:"heartbeat"`
 }
 
@@ -122,6 +123,10 @@ func nodeModelStateKey(nodeID, modelID string) string {
 }
 
 func (s *nodeService) establishSession(ctx context.Context, identity nodeIdentity, sessionID string, expires time.Time) (uint64, error) {
+	eventID, eventPayload, _, _, err := prepareNodeEvent(identity.NodeID, "node.join", nil, nil, map[string]string{"session_id": sessionID})
+	if err != nil {
+		return 0, err
+	}
 	value, err := s.redis.Eval(ctx, `
 local node_type=redis.call('TYPE',KEYS[1]).ok
 local generation_type=redis.call('TYPE',KEYS[2]).ok
@@ -130,9 +135,12 @@ local leases_type=redis.call('TYPE',KEYS[5]).ok
 local details_type=redis.call('TYPE',KEYS[6]).ok
 local revision_type=redis.call('TYPE',KEYS[7]).ok
 local live_type=redis.call('TYPE',KEYS[8]).ok
+local sequence_type=redis.call('TYPE',KEYS[9]).ok
+local outbox_type=redis.call('TYPE',KEYS[10]).ok
 if node_type~='string' or (generation_type~='none' and generation_type~='string') or (session_type~='none' and session_type~='string') or
    (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
-   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node session key type mismatch') end
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') or
+   (sequence_type~='none' and sequence_type~='string') or (outbox_type~='none' and outbox_type~='stream') then return redis.error_reply('node session key type mismatch') end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[1]))
 if not ok or type(node)~='table' or node['id']~=ARGV[1] or node['owner_id']~=ARGV[2] or node['secret_version']~=tonumber(ARGV[3]) or node['revoked']~=false then return false end
 local generation=redis.call('INCR',KEYS[2])
@@ -144,9 +152,16 @@ local now=redis.call('TIME')
 local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
 redis.call('XTRIM',KEYS[8],'MINID',cutoff)
 redis.call('EXPIRE',KEYS[8],86400)
+local sequence=redis.call('INCR',KEYS[9])
+local event_clock=redis.call('TIME')
+local event_ms=tonumber(event_clock[1])*1000+math.floor(tonumber(event_clock[2])/1000)
+redis.call('XADD',KEYS[10],'*','event_id',ARGV[6],'event_type','node.join','node_id',ARGV[1],
+  'request_id','','attempt_id','','sequence',tostring(sequence),'occurred_ms',tostring(event_ms),
+  'observed_ms',tostring(event_ms),'payload',ARGV[7])
 return generation`, []string{nodeRecordKey(identity.NodeID), nodeGenerationKey(identity.NodeID), nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID),
-		nodeLeaseIndexKey(identity.NodeID), nodeLeaseDetailsKey(identity.NodeID), nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID)},
-		identity.NodeID, identity.OwnerID, identity.SecretVersion, sessionID, int64(time.Until(expires).Seconds())).Int64()
+		nodeLeaseIndexKey(identity.NodeID), nodeLeaseDetailsKey(identity.NodeID), nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID),
+		nodeEventSequenceKey(identity.NodeID), nodeEventsOutbox},
+		identity.NodeID, identity.OwnerID, identity.SecretVersion, sessionID, int64(time.Until(expires).Seconds()), eventID, eventPayload).Int64()
 	if err != nil {
 		return 0, err
 	}
@@ -178,14 +193,27 @@ func (s *nodeService) recordNodeHeartbeat(ctx context.Context, identity nodeIden
 	if err != nil {
 		return err
 	}
+	models := append([]nodeModelReport(nil), heartbeat.Payload.Models...)
+	for index := range models {
+		models[index].UpdatedAt = heartbeat.Received
+	}
+	eventID, eventPayload, _, _, err := prepareNodeEvent(identity.NodeID, "node.heartbeat", nil, nil, map[string]any{
+		"session_id": sessionID, "latency_ms": heartbeat.LatencyMS, "model_states": models,
+	})
+	if err != nil {
+		return err
+	}
 	result, err := s.redis.Eval(ctx, `
 local session_type=redis.call('TYPE',KEYS[1]).ok
 local node_type=redis.call('TYPE',KEYS[2]).ok
 local heartbeat_type=redis.call('TYPE',KEYS[3]).ok
 local revision_type=redis.call('TYPE',KEYS[4]).ok
 local live_type=redis.call('TYPE',KEYS[5]).ok
+local sequence_type=redis.call('TYPE',KEYS[6]).ok
+local outbox_type=redis.call('TYPE',KEYS[7]).ok
 if session_type~='string' or node_type~='string' or (heartbeat_type~='none' and heartbeat_type~='string') or
-   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node heartbeat key type mismatch') end
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') or
+   (sequence_type~='none' and sequence_type~='string') or (outbox_type~='none' and outbox_type~='stream') then return redis.error_reply('node heartbeat key type mismatch') end
 if redis.call('GET',KEYS[1])~=ARGV[1]..':'..ARGV[2] then return 0 end
 local ok,node=pcall(cjson.decode,redis.call('GET',KEYS[2]))
 if not ok or type(node)~='table' or node['id']~=ARGV[3] or node['owner_id']~=ARGV[4] or node['secret_version']~=tonumber(ARGV[5]) or node['revoked']~=false then return 0 end
@@ -199,10 +227,16 @@ local now=redis.call('TIME')
 local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
 redis.call('XTRIM',KEYS[5],'MINID',cutoff)
 redis.call('EXPIRE',KEYS[5],86400)
+local sequence=redis.call('INCR',KEYS[6])
+local event_clock=redis.call('TIME')
+local event_ms=tonumber(event_clock[1])*1000+math.floor(tonumber(event_clock[2])/1000)
+redis.call('XADD',KEYS[7],'*','event_id',ARGV[10],'event_type','node.heartbeat','node_id',ARGV[3],
+  'request_id','','attempt_id','','sequence',tostring(sequence),'occurred_ms',tostring(event_ms),
+  'observed_ms',tostring(event_ms),'payload',ARGV[11])
 return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID),
-		nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID)},
+		nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID), nodeEventSequenceKey(identity.NodeID), nodeEventsOutbox},
 		sessionID, identity.Generation, identity.NodeID, identity.OwnerID, identity.SecretVersion, string(encoded),
-		int64(nodeHeartbeatLimit.Seconds()), string(hardware), heartbeat.Received).Int()
+		int64(nodeHeartbeatLimit.Seconds()), string(hardware), heartbeat.Received, eventID, eventPayload).Int()
 	if err != nil {
 		return err
 	}
@@ -248,17 +282,29 @@ return 1`, []string{nodeSessionKey(identity.NodeID), nodeRecordKey(identity.Node
 	return nil
 }
 
-func (s *nodeService) clearNodeSession(ctx context.Context, identity nodeIdentity, sessionID string) error {
-	return s.redis.Eval(ctx, `
+func (s *nodeService) clearNodeSession(ctx context.Context, identity nodeIdentity, sessionID string, reason string) error {
+	if !validSafeNodeEventCode(reason) {
+		return ErrInvalid
+	}
+	eventID, eventPayload, _, _, err := prepareNodeEvent(identity.NodeID, "node.leave", nil, nil, map[string]string{
+		"session_id": sessionID, "reason": reason,
+	})
+	if err != nil {
+		return err
+	}
+	result, err := s.redis.Eval(ctx, `
 local session_type=redis.call('TYPE',KEYS[1]).ok
 local heartbeat_type=redis.call('TYPE',KEYS[2]).ok
 local leases_type=redis.call('TYPE',KEYS[3]).ok
 local details_type=redis.call('TYPE',KEYS[4]).ok
 local revision_type=redis.call('TYPE',KEYS[5]).ok
 local live_type=redis.call('TYPE',KEYS[6]).ok
+local sequence_type=redis.call('TYPE',KEYS[7]).ok
+local outbox_type=redis.call('TYPE',KEYS[8]).ok
 if (session_type~='none' and session_type~='string') or (heartbeat_type~='none' and heartbeat_type~='string') or
    (leases_type~='none' and leases_type~='zset') or (details_type~='none' and details_type~='hash') or
-   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') then return redis.error_reply('node session key type mismatch') end
+   (revision_type~='none' and revision_type~='string') or (live_type~='none' and live_type~='stream') or
+   (sequence_type~='none' and sequence_type~='string') or (outbox_type~='none' and outbox_type~='stream') then return redis.error_reply('node session key type mismatch') end
 if redis.call('GET',KEYS[1])==ARGV[1]..':'..ARGV[2] then
   redis.call('DEL',KEYS[1],KEYS[2],KEYS[3],KEYS[4])
   local revision=redis.call('INCR',KEYS[5])
@@ -267,10 +313,21 @@ if redis.call('GET',KEYS[1])==ARGV[1]..':'..ARGV[2] then
   local cutoff=string.format('%.0f',tonumber(now[1])*1000-86400000)..'-0'
   redis.call('XTRIM',KEYS[6],'MINID',cutoff)
   redis.call('EXPIRE',KEYS[6],86400)
+  local sequence=redis.call('INCR',KEYS[7])
+  local event_clock=redis.call('TIME')
+  local event_ms=tonumber(event_clock[1])*1000+math.floor(tonumber(event_clock[2])/1000)
+  redis.call('XADD',KEYS[8],'*','event_id',ARGV[4],'event_type','node.leave','node_id',ARGV[3],
+    'request_id','','attempt_id','','sequence',tostring(sequence),'occurred_ms',tostring(event_ms),
+    'observed_ms',tostring(event_ms),'payload',ARGV[5])
   return 1
 end
 return 0`, []string{nodeSessionKey(identity.NodeID), nodeHeartbeatKey(identity.NodeID), nodeLeaseIndexKey(identity.NodeID),
-		nodeLeaseDetailsKey(identity.NodeID), nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID)}, sessionID, identity.Generation, identity.NodeID).Err()
+		nodeLeaseDetailsKey(identity.NodeID), nodeRevisionKey(identity.NodeID), accountLiveKey(identity.OwnerID),
+		nodeEventSequenceKey(identity.NodeID), nodeEventsOutbox}, sessionID, identity.Generation, identity.NodeID, eventID, eventPayload).Int()
+	if err != nil || result != 1 {
+		return err
+	}
+	return nil
 }
 
 func (h *Handler) nodeWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -349,10 +406,11 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 		return
 	}
 	identity.SessionID, identity.Generation = sessionID, generation
+	leaveReason := "disconnected"
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_ = h.nodes.clearNodeSession(cleanup, identity, sessionID)
+		_ = h.nodes.clearNodeSession(cleanup, identity, sessionID, leaveReason)
 	}()
 	ctx, cancel := context.WithDeadline(parent, expires)
 	defer cancel()
@@ -392,10 +450,23 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 	}
 	lastHeartbeat := now
 	var lastPong atomic.Int64
+	var pingSentAt atomic.Int64
+	var lastPingRTT atomic.Int64
 	lastPong.Store(now.UnixNano())
 	conn.SetPongHandler(func(string) error {
-		lastPong.Store(time.Now().UnixNano())
-		return conn.SetReadDeadline(time.Now().Add(nodeHeartbeatLimit))
+		pongAt := time.Now()
+		lastPong.Store(pongAt.UnixNano())
+		if sentAt := pingSentAt.Swap(0); sentAt > 0 {
+			rtt := pongAt.Sub(time.Unix(0, sentAt)).Milliseconds()
+			if rtt < 0 {
+				rtt = 0
+			}
+			if rtt > 60_000 {
+				rtt = 60_000
+			}
+			lastPingRTT.Store(rtt)
+		}
+		return conn.SetReadDeadline(pongAt.Add(nodeHeartbeatLimit))
 	})
 	pingDone := make(chan struct{})
 	go func() {
@@ -413,7 +484,11 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 					_ = conn.Close()
 					return
 				}
-				_ = conn.WriteControl(websocket.PingMessage, []byte("cordova"), time.Now().Add(time.Second))
+				sentAt := time.Now().UnixNano()
+				pingSentAt.Store(sentAt)
+				if err := conn.WriteControl(websocket.PingMessage, []byte("cordova"), time.Now().Add(time.Second)); err != nil {
+					pingSentAt.CompareAndSwap(sentAt, 0)
+				}
 			}
 		}
 	}()
@@ -511,7 +586,12 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 				return
 			}
 			lastHeartbeat = time.Now().UTC()
-			heartbeatRecord := nodeSessionHeartbeat{SessionID: sessionID, NodeID: identity.NodeID, Received: lastHeartbeat.Format(time.RFC3339Nano), Payload: heartbeat}
+			rtt := lastPingRTT.Load()
+			if rtt < 0 {
+				rtt = 0
+			}
+			heartbeatRecord := nodeSessionHeartbeat{SessionID: sessionID, NodeID: identity.NodeID,
+				Received: lastHeartbeat.Format(time.RFC3339Nano), LatencyMS: uint64(rtt), Payload: heartbeat}
 			if err := h.nodes.recordNodeHeartbeat(ctx, identity, sessionID, heartbeatRecord); err != nil {
 				if errors.Is(err, ErrNodeConflict) {
 					nodeClose(conn, 4001, "stale session")
@@ -587,6 +667,7 @@ func (h *Handler) runNodeConnection(parent context.Context, conn *websocket.Conn
 				nodeClose(conn, websocket.ClosePolicyViolation, "active server lease")
 				return
 			}
+			leaveReason = goodbye.Reason
 			nodeClose(conn, websocket.CloseNormalClosure, "goodbye")
 			return
 		case "error":

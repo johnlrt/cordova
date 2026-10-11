@@ -38,6 +38,8 @@ type nodeCapacityProfile struct {
 	Rank                         int    `json:"rank"`
 	FirstTokenLatencyMS          uint64 `json:"first_token_latency_ms"`
 	VerifiedTokensPerSecondMilli uint64 `json:"verified_tokens_per_second_milli"`
+	VerifiedOutputTokens         uint32 `json:"verified_output_tokens"`
+	BenchmarkElapsedMS           uint32 `json:"benchmark_elapsed_ms"`
 }
 
 type nodeLeaseRecord struct {
@@ -442,7 +444,8 @@ func (s *nodeService) setVerifiedNodeCapacity(ctx context.Context, profile nodeC
 		profile.VerifiedSlots == 0 || profile.VerifiedSlots > 64 || profile.VerifiedCapacityBytes == 0 ||
 		profile.VerifiedCapacityBytes > (1<<53)-1 || profile.Rank < 0 || profile.Rank > 100 || profile.FirstTokenLatencyMS == 0 ||
 		profile.FirstTokenLatencyMS > 30_000 || profile.VerifiedTokensPerSecondMilli < 2_000 ||
-		profile.VerifiedTokensPerSecondMilli > (1<<53)-1 {
+		profile.VerifiedTokensPerSecondMilli > (1<<53)-1 || profile.VerifiedOutputTokens == 0 ||
+		profile.VerifiedOutputTokens > 1_000_000 || profile.BenchmarkElapsedMS == 0 || profile.BenchmarkElapsedMS > 600_000 {
 		return ErrInvalid
 	}
 	now := time.Now().Unix()
