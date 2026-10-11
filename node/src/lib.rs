@@ -19,6 +19,8 @@ pub enum NodeError {
     Config(String),
     #[error("credential storage is unavailable: {0}")]
     Credential(String),
+    #[error("server rejected node authentication; re-enroll or check protocol compatibility")]
+    AuthenticationRejected,
     #[error("server request failed: {0}")]
     Http(String),
     #[error("WebSocket connection failed: {0}")]

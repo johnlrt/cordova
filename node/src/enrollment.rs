@@ -3,7 +3,7 @@ use std::time::Duration;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
-use reqwest::StatusCode;
+use reqwest::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -220,15 +220,14 @@ pub async fn issue_access_token(
         .as_deref()
         .ok_or_else(|| NodeError::Config("server is not configured".into()))?;
     let client = http_client(config)?;
-    let challenge: AuthChallenge = client
+    let challenge_response = client
         .post(format!("{origin}/api/node/auth/challenge"))
         .json(&serde_json::json!({"node_id":node_id}))
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(|_| NodeError::Http("node authentication challenge failed".into()))?
-        .error_for_status()
-        .map_err(|_| NodeError::Http("node authentication challenge was rejected".into()))?
+        .map_err(|_| NodeError::Http("node authentication challenge failed".into()))?;
+    let challenge: AuthChallenge = auth_response(challenge_response)?
         .json()
         .await
         .map_err(|_| NodeError::Http("node authentication challenge response is invalid".into()))?;
@@ -243,15 +242,14 @@ pub async fn issue_access_token(
         ));
     }
     let proof = auth_proof(node_secret, node_id, &challenge.nonce)?;
-    let token: AccessToken = client
+    let token_response = client
         .post(format!("{origin}/api/node/auth/token"))
         .json(&serde_json::json!({"node_id":node_id,"nonce":challenge.nonce,"proof":proof}))
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(|_| NodeError::Http("node authentication failed".into()))?
-        .error_for_status()
-        .map_err(|_| NodeError::Http("node authentication was rejected".into()))?
+        .map_err(|_| NodeError::Http("node authentication failed".into()))?;
+    let token: AccessToken = auth_response(token_response)?
         .json()
         .await
         .map_err(|_| NodeError::Http("node authentication response is invalid".into()))?;
@@ -266,6 +264,23 @@ pub async fn issue_access_token(
         ));
     }
     Ok(token)
+}
+
+fn auth_response(response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status.is_server_error()
+    {
+        return Err(NodeError::Http(format!(
+            "node authentication is temporarily unavailable (HTTP {})",
+            status.as_u16()
+        )));
+    }
+    Err(NodeError::AuthenticationRejected)
 }
 
 pub fn auth_proof(node_secret: &str, node_id: &str, nonce: &str) -> Result<String> {

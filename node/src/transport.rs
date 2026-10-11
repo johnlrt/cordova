@@ -210,12 +210,10 @@ pub async fn run_forever(config: Config) -> Result<()> {
         }
         match result {
             Ok(()) => backoff_attempt = 0,
-            Err(NodeError::Http(ref msg)) if msg.contains("authentication was rejected") => {
+            Err(NodeError::AuthenticationRejected) => {
                 manager.shutdown().await;
                 write_stopped_status(&config, &node_id, Some("unauthenticated")).await;
-                return Err(NodeError::Credential(
-                    "server rejected node authentication; revoke or re-enroll this node".into(),
-                ));
+                return Err(NodeError::AuthenticationRejected);
             }
             Err(error) => {
                 tracing::warn!(error_code = safe_error_code(&error), "node session ended");
@@ -893,7 +891,14 @@ async fn open_socket(
         None,
     )
     .await
-    .map_err(|_| NodeError::WebSocket("TLS or WebSocket handshake failed".into()))?;
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response)
+            if response.status().as_u16() == 401 =>
+        {
+            NodeError::AuthenticationRejected
+        }
+        _ => NodeError::WebSocket("TLS or WebSocket handshake failed".into()),
+    })?;
     Ok(socket)
 }
 
@@ -1491,6 +1496,7 @@ async fn write_stopped_status(config: &Config, node_id: &str, error: Option<&str
 fn safe_error_code(error: &NodeError) -> &'static str {
     match error {
         NodeError::Credential(_) => "credential_error",
+        NodeError::AuthenticationRejected => "unauthenticated",
         NodeError::Config(_) => "configuration_error",
         NodeError::Catalog(_) => "catalog_mismatch",
         NodeError::Model(message) if message == "timeout" => "timeout",

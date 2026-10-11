@@ -87,3 +87,7 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 | GitHub Actions Rust format, tests, clippy и dependency audit | Прошли в PR-run для PR #22, включая два новых SOCKS5h теста | Локальный Windows checkout не имеет Rust toolchain; фактический внешний SOCKS/DNS-сервер и другие ОС не использовались. |
 
 Новые локальные SOCKS-тесты проверяют, что нода передаёт непреобразованный hostname как SOCKS5 domain target, и что недоступный прокси не приводит к соединению с прямой целью. Полный B4 gate остаётся открытым до проверки reconnect, отозванных credentials, credential store и поддерживаемых платформ.
+
+### Обработка отказа node-auth — 2026-10-11
+
+Клиент теперь должен завершать сессию после постоянного отказа авторизации (`401` на challenge, token или WebSocket handshake), а `408`, `429` и `5xx` оставлять для повторного подключения с backoff. Эта правка ещё не собрана и не проверена CI; реальный сценарий отзыва node-secret не выполнялся. B4 остаётся открытым до теста отказа и transport smoke на поддерживаемых ОС.
