@@ -822,7 +822,9 @@ where
                     "binary WebSocket messages are not supported".into(),
                 ));
             }
-            Some(Ok(Message::Close(Some(frame)))) if frame.reason.as_ref() == "unauthenticated" => {
+            Some(Ok(Message::Close(Some(frame))))
+                if AsRef::<str>::as_ref(&frame.reason) == "unauthenticated" =>
+            {
                 return Err(NodeError::AuthenticationRejected);
             }
             Some(Ok(Message::Close(_))) | None => {
