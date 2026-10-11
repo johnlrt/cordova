@@ -301,8 +301,7 @@ func (c *Coordinator) Execute(ctx context.Context, params Params, input inferenc
 			claimDeviation := false
 			if auditor, ok := attempt.(OutputClaimAuditor); ok {
 				claimedInput, claimedOutput := auditor.OutputClaims()
-				claimDeviation = claimedInput != nil && uint64(*claimedInput) != uint64(inputTokens) ||
-					claimedOutput != nil && uint64(*claimedOutput) != uint64(verifiedOutputTokens)
+				claimDeviation = hasClaimDeviation(claimedInput, claimedOutput, inputTokens, verifiedOutputTokens)
 			}
 			var verified uint32
 			if verifiedOutputTokens > 0 {
@@ -405,6 +404,29 @@ type attemptOutcome struct {
 	elapsedMS       uint32
 	firstTokenMS    *uint32
 	err             error
+}
+
+// hasClaimDeviation applies T01's tolerance to node-reported output counts.
+// Input token claims must match exactly; output claims are flagged only when
+// the difference exceeds both two tokens and two percent of server usage.
+func hasClaimDeviation(claimedInput, claimedOutput *uint32, inputTokens, outputTokens int64) bool {
+	if claimedInput != nil && (inputTokens < 0 || uint64(*claimedInput) != uint64(inputTokens)) {
+		return true
+	}
+	if claimedOutput == nil {
+		return false
+	}
+	if outputTokens < 0 {
+		return true
+	}
+	claimed, actual := uint64(*claimedOutput), uint64(outputTokens)
+	difference := claimed
+	if claimed > actual {
+		difference = claimed - actual
+	} else {
+		difference = actual - claimed
+	}
+	return difference > 2 && difference*100 > actual*2
 }
 
 func (c *Coordinator) runAttempt(ctx context.Context, modelID string, input inference.Request, stream bool,

@@ -16,6 +16,14 @@ func rankMessage(id, eventType string, payload any) redis.XMessage {
 	return redis.XMessage{ID: id, Values: map[string]any{"event_type": eventType, "payload": string(encoded)}}
 }
 
+func rankOutcomeMessage(id, eventID, requestID, attemptID string, payload RequestOutcomePayload) redis.XMessage {
+	message := rankMessage(id, "node.request_outcome", payload)
+	message.Values["event_id"] = eventID
+	message.Values["request_id"] = requestID
+	message.Values["attempt_id"] = attemptID
+	return message
+}
+
 func TestRankAggregationUsesRedisArrivalTimeAndDeduplicatesHeartbeatIntervals(t *testing.T) {
 	base := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 	aggregate := newRankAggregation(base.Add(time.Hour))
@@ -71,6 +79,42 @@ func TestLatestFailedBenchmarkInvalidatesEarlierPassingBenchmark(t *testing.T) {
 	window := aggregate.finish()
 	if window.BenchmarkPassed {
 		t.Fatalf("latest failed benchmark must replace prior pass: %+v", window)
+	}
+}
+
+func TestRankAggregationBuildsContentFreeT01AndT03ReviewSignals(t *testing.T) {
+	aggregate := newRankAggregation(time.Now().UTC())
+	passed := true
+	benchmark := BenchmarkPayload{ModelID: "cordova-chat-small-v1", VerifiedOutputTokens: 400,
+		VerifiedSlots: 2, ElapsedMS: 4_000, Passed: &passed}
+	if err := aggregate.add(rankMessage("1791720000000-0", "node.benchmark", benchmark)); err != nil {
+		t.Fatal(err)
+	}
+	outcome := RequestOutcomePayload{ModelID: "cordova-chat-small-v1", Outcome: "success", ElapsedMS: 1_000,
+		VerifiedOutputTokens: 121, ClaimDeviation: true}
+	eventID := "00000000-0000-4000-8000-000000000020"
+	requestID := "00000000-0000-4000-8000-000000000021"
+	attemptID := "00000000-0000-4000-8000-000000000022"
+	if err := aggregate.add(rankOutcomeMessage("1791720001000-0", eventID, requestID, attemptID, outcome)); err != nil {
+		t.Fatal(err)
+	}
+	if len(aggregate.fraudSignals) != 2 {
+		t.Fatalf("fraud signals = %+v; want T01 and T03 flags", aggregate.fraudSignals)
+	}
+	want := map[string]bool{fraudClaimDeviation: false, fraudHighThroughput: false}
+	for _, signal := range aggregate.fraudSignals {
+		if signal.SourceEventID != eventID || signal.RequestID != requestID || signal.AttemptID != attemptID || signal.ObservedAt == "" {
+			t.Fatalf("fraud signal contains incorrect event metadata: %+v", signal)
+		}
+		if _, ok := want[signal.Code]; !ok {
+			t.Fatalf("unexpected fraud signal code %q", signal.Code)
+		}
+		want[signal.Code] = true
+	}
+	for code, seen := range want {
+		if !seen {
+			t.Fatalf("missing fraud signal %q", code)
+		}
 	}
 }
 

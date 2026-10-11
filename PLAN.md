@@ -393,6 +393,7 @@ Prefix keys `cv:v1:`; one standalone primary supports cross-account scripts. Nev
 | `model-nodes:<slug>` / `node-model:<node>:<slug>` | Candidate set / state hash with artifact and verified slots | Projection rebuildable; do not expire leased state |
 | `rank:<node>` / `rank-events:<node>` | Versioned rank hash / content-free Redis-arrival event stream, trimmed to 48h; `ranker-nodes` indexes node IDs for periodic recompute | Current / 48h |
 | `rank-sequence:<node>` / `ranker-event:<event_id>` / `ranker-session:<node>` | Last accepted source sequence / event dedupe marker / currently fenced session | Until node removal / 7d / current session |
+| `rank-fraud-signals:<node>` / `ranker-fraud-signal:<node>:<event>:<code>` | Content-free T01/T03 review signals / seven-day dedupe marker | 7d / 7d |
 | `ranker-nodes` / `node-quarantine:<node>` | Set of node IDs with rank event history / operator-or-fraud quarantine marker | Remove index member on node removal / until quarantine release |
 | `outbox-sequence:node:<node>` / `outbox:node` | Per-node event sequence / durable validated node-event envelopes awaiting Kafka acknowledgement | Until node removal / until acknowledged |
 | `consumer-offset:<group>:<topic>:<partition>` / `outbox:rank` | Last atomically projected Kafka offset / durable rank-change events awaiting broker acknowledgement | Durable / until acknowledged |

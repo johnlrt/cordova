@@ -187,6 +187,33 @@ func TestCoordinatorReportsOnlyServerMeasuredOutcomeMetadata(t *testing.T) {
 	}
 }
 
+func TestT01ClaimDeviationUsesExactInputAndTolerantOutputThreshold(t *testing.T) {
+	input := uint32(100)
+	tests := []struct {
+		name   string
+		claim  uint32
+		actual int64
+		want   bool
+	}{
+		{name: "exact output", claim: 100, actual: 100},
+		{name: "two token allowance", claim: 102, actual: 100},
+		{name: "two percent allowance", claim: 1_020, actual: 1_000},
+		{name: "above output allowance", claim: 103, actual: 100, want: true},
+		{name: "short output deviation", claim: 13, actual: 10, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hasClaimDeviation(&input, &test.claim, 100, test.actual); got != test.want {
+				t.Fatalf("claim deviation = %v, want %v", got, test.want)
+			}
+		})
+	}
+	wrongInput := uint32(99)
+	if !hasClaimDeviation(&wrongInput, nil, 100, 100) {
+		t.Fatal("input claim mismatch was not flagged")
+	}
+}
+
 func mustMarshal(t *testing.T, value any) []byte {
 	t.Helper()
 	encoded, err := json.Marshal(value)

@@ -33,6 +33,13 @@ type rankAggregation struct {
 	benchmarkAt     time.Time
 	latencies       []uint64
 	heartbeatSlots  map[uint64]struct{}
+	benchmarks      map[string]benchmarkObservation
+	fraudSignals    []fraudSignal
+}
+
+type benchmarkObservation struct {
+	payload BenchmarkPayload
+	arrival time.Time
 }
 
 func newRankAggregation(now time.Time) rankAggregation {
@@ -40,6 +47,8 @@ func newRankAggregation(now time.Time) rankAggregation {
 		window:         Window{Now: now, ExpectedHeartbeatIntervals: rankExpectedIntervals},
 		latencies:      make([]uint64, 0),
 		heartbeatSlots: make(map[uint64]struct{}),
+		benchmarks:     make(map[string]benchmarkObservation),
+		fraudSignals:   make([]fraudSignal, 0),
 	}
 }
 
@@ -76,6 +85,7 @@ func (a *rankAggregation) add(message redis.XMessage) error {
 		a.window.TestedCapacityBytes = payload.TestedCapacityBytes
 		a.window.VerifiedOutputTokens = uint64(payload.VerifiedOutputTokens)
 		a.window.BenchmarkElapsedMS = uint64(payload.ElapsedMS)
+		a.benchmarks[payload.ModelID] = benchmarkObservation{payload: payload, arrival: arrival}
 	case "node.request_outcome":
 		var payload RequestOutcomePayload
 		if err := json.Unmarshal([]byte(payloadText), &payload); err != nil {
@@ -88,7 +98,38 @@ func (a *rankAggregation) add(message redis.XMessage) error {
 		if payload.FirstTokenMS != nil {
 			a.latencies = append(a.latencies, uint64(*payload.FirstTokenMS))
 		}
+		if payload.ClaimDeviation {
+			if err := a.addFraudSignal(message, arrival, fraudClaimDeviation); err != nil {
+				return err
+			}
+		}
+		if benchmark, exists := a.benchmarks[payload.ModelID]; exists &&
+			!arrival.Before(benchmark.arrival) && arrival.Sub(benchmark.arrival) <= benchmarkMaxAge {
+			if code := throughputFraudSignal(payload, benchmark.payload); code != "" {
+				if err := a.addFraudSignal(message, arrival, code); err != nil {
+					return err
+				}
+			}
+		}
 	}
+	return nil
+}
+
+func (a *rankAggregation) addFraudSignal(message redis.XMessage, observedAt time.Time, code string) error {
+	eventID, ok := streamField(message.Values, "event_id")
+	if !ok || !validUUID(eventID) {
+		return errors.New("fraud signal source event ID is invalid")
+	}
+	requestID, ok := streamField(message.Values, "request_id")
+	if !ok || !validUUID(requestID) {
+		return errors.New("fraud signal request ID is invalid")
+	}
+	attemptID, ok := streamField(message.Values, "attempt_id")
+	if !ok || !validUUID(attemptID) {
+		return errors.New("fraud signal attempt ID is invalid")
+	}
+	a.fraudSignals = append(a.fraudSignals, fraudSignal{SourceEventID: eventID, RequestID: requestID,
+		AttemptID: attemptID, Code: code, ObservedAt: observedAt.UTC().Format(time.RFC3339Nano)})
 	return nil
 }
 
@@ -204,6 +245,9 @@ func (w *Worker) recomputeNode(ctx context.Context, nodeID string, now time.Time
 		minimumID = "(" + messages[len(messages)-1].ID
 	}
 	window := aggregate.finish()
+	if err := w.persistFraudSignals(ctx, nodeID, aggregate.fraudSignals); err != nil {
+		return errors.New("ranker could not persist fraud review signals")
+	}
 	quarantined, err := w.redis.Exists(ctx, "cv:v1:node-quarantine:"+nodeID).Result()
 	if err != nil {
 		return errors.New("ranker could not read node quarantine state")
@@ -245,6 +289,46 @@ func (w *Worker) recomputeNode(ctx context.Context, nodeID string, now time.Time
 	}
 	return nil
 }
+
+func (w *Worker) persistFraudSignals(ctx context.Context, nodeID string, signals []fraudSignal) error {
+	if len(signals) == 0 {
+		return nil
+	}
+	stream := "cv:v1:rank-fraud-signals:" + nodeID
+	for _, signal := range signals {
+		if !validUUID(signal.SourceEventID) || !validUUID(signal.RequestID) || !validUUID(signal.AttemptID) ||
+			(signal.Code != fraudClaimDeviation && signal.Code != fraudHighThroughput && signal.Code != fraudLowThroughput) {
+			return errors.New("invalid fraud review signal")
+		}
+		dedupe := "cv:v1:ranker-fraud-signal:" + nodeID + ":" + signal.SourceEventID + ":" + signal.Code
+		if err := w.redis.Eval(ctx, persistFraudSignalScript, []string{stream, dedupe}, signal.SourceEventID,
+			signal.RequestID, signal.AttemptID, signal.Code, signal.ObservedAt).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const persistFraudSignalScript = `
+local stream_type=redis.call('TYPE',KEYS[1]).ok
+local dedupe_type=redis.call('TYPE',KEYS[2]).ok
+if (stream_type~='none' and stream_type~='stream') or (dedupe_type~='none' and dedupe_type~='string') then
+  return redis.error_reply('fraud signal key type mismatch')
+end
+local inserted=redis.call('SET',KEYS[2],'1','NX','EX',604800)
+if inserted then
+  local appended=redis.pcall('XADD',KEYS[1],'*','source_event_id',ARGV[1],'request_id',ARGV[2],
+    'attempt_id',ARGV[3],'signal_code',ARGV[4],'observed_at',ARGV[5])
+  if type(appended)=='table' and appended['err'] then
+    redis.call('DEL',KEYS[2])
+    return redis.error_reply(appended['err'])
+  end
+  redis.call('XTRIM',KEYS[1],'MAXLEN','~',10000)
+  redis.call('EXPIRE',KEYS[1],604800)
+  return 1
+end
+return 0
+`
 
 const persistRankScript = `
 local rank_type=redis.call('TYPE',KEYS[1]).ok

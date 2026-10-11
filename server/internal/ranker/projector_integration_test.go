@@ -186,6 +186,50 @@ func TestRedisRankPersistenceAndOutboxAreAtomicAndReplayable(t *testing.T) {
 	}
 }
 
+func TestRedisFraudSignalsAreContentFreeAndIdempotent(t *testing.T) {
+	client := rankerIntegrationRedis(t)
+	defer client.Close()
+	ctx := context.Background()
+	nodeID, err := domain.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID, err := domain.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID, err := domain.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := domain.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := "cv:v1:rank-fraud-signals:" + nodeID.String()
+	marker := "cv:v1:ranker-fraud-signal:" + nodeID.String() + ":" + eventID.String() + ":" + fraudClaimDeviation
+	if err := client.Del(ctx, stream, marker).Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Del(ctx, stream, marker).Err() })
+	worker := &Worker{redis: client}
+	signal := fraudSignal{SourceEventID: eventID.String(), RequestID: requestID.String(), AttemptID: attemptID.String(),
+		Code: fraudClaimDeviation, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	if err := worker.persistFraudSignals(ctx, nodeID.String(), []fraudSignal{signal, signal}); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := client.XRange(ctx, stream, "-", "+").Result()
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("fraud signal stream = %#v, %v; want exactly one idempotent signal", messages, err)
+	}
+	message := messages[0]
+	if message.Values["source_event_id"] != eventID.String() || message.Values["request_id"] != requestID.String() ||
+		message.Values["attempt_id"] != attemptID.String() || message.Values["signal_code"] != fraudClaimDeviation ||
+		message.Values["prompt"] != nil || message.Values["response"] != nil {
+		t.Fatalf("fraud signal contains invalid or content-bearing fields: %#v", message.Values)
+	}
+}
+
 func rankerIntegrationRedis(t *testing.T) *redis.Client {
 	t.Helper()
 	raw := strings.TrimSpace(os.Getenv("CORDOVA_TEST_REDIS_URL"))
