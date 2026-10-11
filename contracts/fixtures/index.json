@@ -160,6 +160,16 @@
     "valid": true
   },
   {
+    "file": "internal/tokenizer-unauthorized.json",
+    "schema": "internal/tokenizer.schema.json#/$defs/ErrorResponse",
+    "valid": true
+  },
+  {
+    "file": "internal/tokenizer-context-exceeded.json",
+    "schema": "internal/tokenizer.schema.json#/$defs/ErrorResponse",
+    "valid": true
+  },
+  {
     "file": "internal/tokenizer-bad-hash.json",
     "schema": "internal/tokenizer.schema.json#/$defs/PrepareResponse",
     "valid": false

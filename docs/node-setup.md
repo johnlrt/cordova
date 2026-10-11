@@ -25,6 +25,8 @@ The Go gateway can distribute an operator-provided signed catalog. Set `CORDOVA_
 
 The M1 gateway can use the private C9 tokenizer client when `CORDOVA_TOKENIZER_URL` and `CORDOVA_TOKENIZER_TOKEN` (or `CORDOVA_TOKENIZER_TOKEN_FILE`) are both configured. The token is scoped to the helper. Remote helpers must use HTTPS; plain HTTP is accepted only on loopback for development. System certificate roots are used by default, with an optional private CA bundle at `CORDOVA_TOKENIZER_CA_FILE`. The client disables proxy use and redirects, bounds request/response sizes and deadlines, validates strict JSON responses, and checks `/readyz` against every model and the exact catalog version before serving requests. A configured helper requires a non-empty signed catalog; model IDs, context limits, tokenizer hashes and template hashes come only from manifests that passed signature verification. Missing or mismatched helper state fails closed. Without these settings, M1 keeps its synthetic word-count tokenizer and remains test-credit-only. This configures token accounting; M1 still routes generation through the mock node, so it does not enable live model inference or satisfy B3's native tokenizer parity gate.
 
+The backend also provides the C9 HTTP handler and `tokenizer.Runtime` boundary with bearer authentication, strict request parsing, per-model concurrency limits, bounded queueing and catalog-bound readiness. It is not a runnable helper yet: no concrete pinned llama.cpp runtime or tokenizer-service command is included, and the handler reports `not_ready` until an admitted runtime is wired in.
+
 ## Commands
 
 ```sh

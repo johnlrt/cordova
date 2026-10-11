@@ -237,6 +237,7 @@ Provide one-command failing scenarios and content-free evidence. After two faile
 
 - v1, 2026-10-08: Define Go/Rust ownership, subsystem boundaries and B0–B11 proof gates.
 - v2, 2026-10-10: Add signed-catalog validation and the gateway-side C9 client/readiness path; the native helper, admitted artifact and helper/node parity gate remain open.
+- v3, 2026-10-10: Add the C9 HTTP handler, authentication, bounded queue and strict error mapping; the runnable pinned runtime and parity evidence remain open.
 
 ## Open risks
 

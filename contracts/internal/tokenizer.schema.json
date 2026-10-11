@@ -33,13 +33,13 @@
       "request": "#/$defs/PrepareRequest",
       "response": "#/$defs/PrepareResponse",
       "success-status": 200,
-      "failure-statuses": [400, 404, 409, 503]
+      "failure-statuses": [400, 401, 404, 405, 409, 503]
     },
     "POST /internal/tokenizer/count": {
       "request": "#/$defs/CountRequest",
       "response": "#/$defs/CountResponse",
       "success-status": 200,
-      "failure-statuses": [400, 404, 409, 503]
+      "failure-statuses": [400, 401, 404, 405, 409, 503]
     },
     "GET /healthz": {"response": "#/$defs/Health", "success-status": 200},
     "GET /readyz": {"response": "#/$defs/Ready", "success-status": 200}

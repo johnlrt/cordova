@@ -40,11 +40,16 @@ var (
 )
 
 type Model struct {
-	ID              string
-	CatalogVersion  string
-	ContextTokens   uint32
-	TokenizerSHA256 string
-	TemplateSHA256  string
+	ID                string
+	CatalogVersion    string
+	ContextTokens     uint32
+	AddBOS            bool
+	ArtifactURL       string
+	ArtifactSHA256    string
+	ArtifactSizeBytes uint64
+	LlamaCommit       string
+	TokenizerSHA256   string
+	TemplateSHA256    string
 }
 
 type Client struct {
