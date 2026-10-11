@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -198,9 +199,80 @@ func (s *nodeService) getNodeForOwner(ctx context.Context, accountID, nodeID str
 func (s *nodeService) nodeView(ctx context.Context, record nodeRecord) (nodeView, error) {
 	view := nodeView{ID: record.ID, Name: record.Name, Status: "offline", Hardware: record.Hardware,
 		Models: make([]nodeModelReport, 0)}
+	quarantined, err := s.redis.Exists(ctx, "cv:v1:node-quarantine:"+record.ID).Result()
+	if err != nil {
+		return nodeView{}, err
+	}
+	if quarantined > 0 {
+		view.Status = "quarantined"
+	}
 	if record.LastSeenAt != "" {
 		lastSeen := record.LastSeenAt
 		view.LastSeenAt = &lastSeen
+	}
+	rankFields, err := s.redis.HMGet(ctx, "cv:v1:rank:"+record.ID,
+		"rank", "updated_at", "tested_capacity_bytes", "measured_tokens_per_second", "latency_ms", "uptime_ratio", "success_ratio").Result()
+	if err != nil {
+		return nodeView{}, err
+	}
+	if rankFields[0] != nil || rankFields[1] != nil {
+		if rankFields[0] == nil || rankFields[1] == nil {
+			return nodeView{}, errors.New("node rank record is incomplete")
+		}
+		rankText, rankOK := rankFields[0].(string)
+		updatedAt, updatedOK := rankFields[1].(string)
+		rank, parseErr := strconv.Atoi(rankText)
+		if !rankOK || !updatedOK || parseErr != nil || rank < 0 || rank > 100 {
+			return nodeView{}, errors.New("node rank record is invalid")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, updatedAt); err != nil {
+			return nodeView{}, errors.New("node rank timestamp is invalid")
+		}
+		view.Rank = &rank
+		view.RankUpdatedAt = &updatedAt
+	}
+	parseUintField := func(index int) (*uint64, error) {
+		if rankFields[index] == nil {
+			return nil, nil
+		}
+		value, ok := rankFields[index].(string)
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if !ok || err != nil || parsed > (1<<53)-1 {
+			return nil, errors.New("node rank metric is invalid")
+		}
+		return &parsed, nil
+	}
+	view.VerifiedCapacityBytes, err = parseUintField(2)
+	if err != nil {
+		return nodeView{}, err
+	}
+	view.LatencyMS, err = parseUintField(4)
+	if err != nil {
+		return nodeView{}, err
+	}
+	parseFloatField := func(index int) (*float64, error) {
+		if rankFields[index] == nil {
+			return nil, nil
+		}
+		value, ok := rankFields[index].(string)
+		parsed, err := strconv.ParseFloat(value, 64)
+		if !ok || err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) ||
+			(index == 5 || index == 6) && parsed > 1 {
+			return nil, errors.New("node rank metric is invalid")
+		}
+		return &parsed, nil
+	}
+	view.MeasuredTokensPerSecond, err = parseFloatField(3)
+	if err != nil {
+		return nodeView{}, err
+	}
+	view.UptimeRatio, err = parseFloatField(5)
+	if err != nil {
+		return nodeView{}, err
+	}
+	view.SuccessRatio, err = parseFloatField(6)
+	if err != nil {
+		return nodeView{}, err
 	}
 	heartbeatData, err := s.redis.Get(ctx, nodeHeartbeatKey(record.ID)).Bytes()
 	if err != nil && err != redis.Nil {
@@ -212,19 +284,23 @@ func (s *nodeService) nodeView(ctx context.Context, record nodeRecord) (nodeView
 			return nodeView{}, errors.New("node heartbeat record is invalid")
 		}
 		view.Models = append(view.Models, heartbeat.Payload.Models...)
-		view.Status = "online"
+		if view.Status != "quarantined" {
+			view.Status = "online"
+		}
 		if len(heartbeat.Payload.ActiveLeases) > 0 {
-			view.Status = "busy"
+			if view.Status != "quarantined" {
+				view.Status = "busy"
+			}
 		}
 		for _, model := range heartbeat.Payload.Models {
-			if model.State == "loading" || model.State == "downloading" {
+			if (model.State == "loading" || model.State == "downloading") && view.Status != "quarantined" {
 				view.Status = "warming"
 				break
 			}
 		}
 	} else {
 		approved, parseErr := time.Parse(time.RFC3339Nano, record.ApprovedAt)
-		if parseErr == nil && time.Since(approved) >= 0 && time.Since(approved) <= nodeHeartbeatLimit {
+		if view.Status != "quarantined" && parseErr == nil && time.Since(approved) >= 0 && time.Since(approved) <= nodeHeartbeatLimit {
 			view.Status = "enrolling"
 		}
 	}

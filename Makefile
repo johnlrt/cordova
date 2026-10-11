@@ -45,6 +45,7 @@ test-node-routing:
 	cd server && $(GO) test -race -count=1 -v ./internal/mocknode ./internal/m1
 
 test-rank-fraud:
+	@test -n "$${CORDOVA_TEST_REDIS_URL:-}" || { echo "CORDOVA_TEST_REDIS_URL must point to an isolated local Redis instance" >&2; exit 2; }
 	cd server && $(GO) test -race -count=1 -v ./internal/ranker
 
 test-edge:

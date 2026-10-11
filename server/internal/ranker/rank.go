@@ -11,28 +11,28 @@ import (
 )
 
 const (
-	FormulaVersion                   = "c6-v1"
-	provisionalRank                  = 10
-	benchmarkMaxAge                  = 24 * time.Hour
-	capacityLimitBytes        uint64 = 24 * 1024 * 1024 * 1024
-	tokensPerSecondLimitMilli uint64 = 100_000
-	latencyLimitMillis        uint64 = 2_000
-	minimumFinishedAttempts   uint64 = 10
+	FormulaVersion                 = "c6-v1"
+	provisionalRank                = 10
+	benchmarkMaxAge                = 24 * time.Hour
+	capacityLimitBytes      uint64 = 24 * 1024 * 1024 * 1024
+	latencyLimitMillis      uint64 = 2_000
+	minimumFinishedAttempts uint64 = 10
 )
 
 var ErrInvalidWindow = errors.New("invalid rank window")
 
 // Window contains server-observed aggregates for one node over its rank
-// window. TokensPerSecondMilli uses thousandths of a token per second. P50
-// latency and heartbeat counts must be calculated from observed timestamps,
-// never from node-provided clocks.
+// window. Benchmark throughput is represented as verified output tokens and
+// elapsed milliseconds so the formula can preserve exact fractional values.
+// P50 latency and heartbeat counts must use server-observed timestamps.
 type Window struct {
 	Quarantined                 bool
 	BenchmarkPassed             bool
 	BenchmarkAt                 time.Time
 	Now                         time.Time
 	TestedCapacityBytes         uint64
-	TokensPerSecondMilli        uint64
+	VerifiedOutputTokens        uint64
+	BenchmarkElapsedMS          uint64
 	ConnectedHeartbeatIntervals uint64
 	ExpectedHeartbeatIntervals  uint64
 	P50ServerLatencyMillis      uint64
@@ -71,9 +71,11 @@ func Compute(window Window) (Result, error) {
 	if window.ExpectedHeartbeatIntervals == 0 || window.TestedCapacityBytes == 0 {
 		return Result{}, ErrInvalidWindow
 	}
+	if window.BenchmarkElapsedMS == 0 {
+		return Result{}, ErrInvalidWindow
+	}
 
 	capacityNumerator := min(window.TestedCapacityBytes, capacityLimitBytes)
-	tokensNumerator := min(window.TokensPerSecondMilli, tokensPerSecondLimitMilli)
 	heartbeatsNumerator := min(window.ConnectedHeartbeatIntervals, window.ExpectedHeartbeatIntervals)
 	latencyNumerator := uint64(0)
 	if window.P50ServerLatencyMillis < latencyLimitMillis {
@@ -82,7 +84,7 @@ func Compute(window Window) (Result, error) {
 
 	total := new(big.Rat)
 	total.Add(total, weightedFraction(20, capacityNumerator, capacityLimitBytes))
-	total.Add(total, weightedFraction(30, tokensNumerator, tokensPerSecondLimitMilli))
+	total.Add(total, weightedThroughputFraction(30, window.VerifiedOutputTokens, window.BenchmarkElapsedMS))
 	total.Add(total, weightedFraction(20, heartbeatsNumerator, window.ExpectedHeartbeatIntervals))
 	total.Add(total, weightedFraction(10, latencyNumerator, latencyLimitMillis))
 
@@ -102,6 +104,19 @@ func Compute(window Window) (Result, error) {
 		result.Rank = 100
 	}
 	return result, nil
+}
+
+// Throughput is tokens / (elapsed_ms / 1000), normalized to 100 tokens/s.
+// Therefore T = min(tokens * 10 / elapsed_ms, 1). Use big integers so callers
+// cannot overflow the multiplication even with adversarial aggregate values.
+func weightedThroughputFraction(weight int64, tokens, elapsedMS uint64) *big.Rat {
+	numerator := new(big.Int).SetUint64(tokens)
+	numerator.Mul(numerator, big.NewInt(10))
+	denominator := new(big.Int).SetUint64(elapsedMS)
+	if numerator.Cmp(denominator) >= 0 {
+		return big.NewRat(weight, 1)
+	}
+	return new(big.Rat).SetFrac(numerator.Mul(numerator, big.NewInt(weight)), denominator)
 }
 
 func weightedFraction(weight int64, numerator, denominator uint64) *big.Rat {

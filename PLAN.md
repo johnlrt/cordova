@@ -372,7 +372,7 @@ The three-way exchange is `model.query` (`has_model?`) → `model.state:loaded|o
 
 Benchmark on first link, every 24h, after model/driver changes and suspicious outcomes. Use fixed, versioned prompts with a per-challenge nonce, 256 maximum output tokens, server-measured elapsed time and increasing concurrency/memory allocation tests. Reserve benchmark slots. Record a demonstrated capacity floor and a safe per-model concurrency limit with 20% memory headroom; do not claim exact VRAM attestation. Disqualify models below 2 verified output tokens/s or above 30s first-token latency in two successive benchmark runs.
 
-Compute rank every minute from the past 24h, with provisional rank 10 until benchmark and ten outcomes. Use score `100 * (0.20*C + 0.30*T + 0.20*U + 0.10*L + 0.20*S)` rounded down, clamp to 0–100. `C=min(tested_capacity_bytes/24GiB,1)`, `T=min(measured_tokens_per_second/100,1)`, `U=connected heartbeat intervals/expected intervals`, `L=clamp(1-p50_server_latency_ms/2000,0,1)`, `S=(successful_attempts+1)/(finished_attempts+2)`. Capacity is also a hard capability filter; score alone does not imply model fit. Assign rank zero to quarantined nodes. Version the formula; use arrival times rather than node clocks. Offline detection bypasses ranker delay.
+Compute rank every minute from the past 24h, with provisional rank 10 until benchmark and ten outcomes. Use score `100 * (0.20*C + 0.30*T + 0.20*U + 0.10*L + 0.20*S)` rounded down once, clamp to 0–100. `C=min(tested_capacity_bytes/24GiB,1)`, `T=min(verified_output_tokens*10/benchmark_elapsed_ms,1)` (exactly equivalent to measured tokens/second divided by 100), `U=connected 15-second heartbeat intervals/expected intervals`, `L=clamp(1-p50_server_latency_ms/2000,0,1)`, using nearest-rank p50 (lower middle for an even sample count), and `S=(successful_attempts+1)/(finished_attempts+2)`. Capacity is also a hard capability filter; score alone does not imply model fit. Assign rank zero to quarantined nodes. Version the formula; use Redis-arrival times rather than node clocks. Offline detection bypasses ranker delay.
 
 ## Shared contract C7 — Redis schema and Kafka topics
 
@@ -391,7 +391,10 @@ Prefix keys `cv:v1:`; one standalone primary supports cross-account scripts. Nev
 | `node-auth-nonce:<hash>` / `node-auth-jti:<hash>` | One-use auth records | 60s / 5min |
 | `model:<slug>:<catalog-version>` / `catalog:active` | Signed immutable manifest JSON / pointer | Keep versions referenced by financial requests |
 | `model-nodes:<slug>` / `node-model:<node>:<slug>` | Candidate set / state hash with artifact and verified slots | Projection rebuildable; do not expire leased state |
-| `rank:<node>` / `rank-window:<node>:<minute>` | Versioned rank hash / aggregate counters | Current / 48h |
+| `rank:<node>` / `rank-events:<node>` | Versioned rank hash / content-free Redis-arrival event stream, trimmed to 48h; `ranker-nodes` indexes node IDs for periodic recompute | Current / 48h |
+| `rank-sequence:<node>` / `ranker-event:<event_id>` / `ranker-session:<node>` | Last accepted source sequence / event dedupe marker / currently fenced session | Until node removal / 7d / current session |
+| `ranker-nodes` / `node-quarantine:<node>` | Set of node IDs with rank event history / operator-or-fraud quarantine marker | Remove index member on node removal / until quarantine release |
+| `consumer-offset:<group>:<topic>:<partition>` / `outbox:rank` | Last atomically projected Kafka offset / durable rank-change events awaiting broker acknowledgement | Durable / until acknowledged |
 | `lease:<id>` / `node-leases:<id>` / `leases:due` | Session-bound attempt/load lease hash / set / deadline sorted set | Explicit release/reaper; no silent TTL-only removal |
 | `request:<id>` / `requests:active` / `account-requests:<id>` | Metadata state, attempts, price snapshot, counts, last operation; active set; timeline sorted set | Financial skeleton 5y; detailed metadata 30d |
 | `idempotency:<account>:<key>:<hash>` / `operation:<id>` | Logical-request mapping/body HMAC / immutable operation result | 5y; body HMAC removed after 30d |

@@ -68,6 +68,28 @@ func nodeCapacityProfileKey(nodeID, modelID string) string {
 	return "cv:v1:node-capacity:" + nodeID + ":" + modelID
 }
 
+func (s *nodeService) routingRank(ctx context.Context, nodeID string, fallback int) (int, error) {
+	if ctx == nil || !validID(nodeID) || fallback < 0 || fallback > 100 {
+		return 0, ErrInvalid
+	}
+	rank, err := s.redis.Eval(ctx, `
+local rank_type=redis.call('TYPE',KEYS[1]).ok
+if rank_type~='none' and rank_type~='hash' then return redis.error_reply('node rank key type mismatch') end
+if redis.call('EXISTS',KEYS[2])==1 then return 0 end
+local rank=redis.call('HGET',KEYS[1],'rank')
+if not rank then return tonumber(ARGV[1]) end
+local parsed=tonumber(rank)
+if not parsed or parsed<0 or parsed>100 or parsed~=math.floor(parsed) then return redis.error_reply('node rank value is invalid') end
+return parsed`, []string{"cv:v1:rank:" + nodeID, "cv:v1:node-quarantine:" + nodeID}, fallback).Int()
+	if err != nil {
+		return 0, err
+	}
+	if rank < 0 || rank > 100 {
+		return 0, errors.New("node rank is outside the supported range")
+	}
+	return rank, nil
+}
+
 func (s *nodeService) claimNodeSlot(ctx context.Context, nodeID, modelID, catalogVersion, artifactSHA256 string,
 	requiredCapacityBytes uint64, attemptID, leaseID string, expiresAt time.Time) (*nodeSlotLease, error) {
 	if ctx == nil || !validID(nodeID) || !validModelSlug(modelID) || !validID(catalogVersion) ||

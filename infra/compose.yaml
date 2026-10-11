@@ -50,6 +50,34 @@ services:
       timeout: 4s
       retries: 8
 
+  ranker:
+    image: cordova-ranker:0.1.0
+    build:
+      context: ..
+      dockerfile: infra/server.Dockerfile
+      target: ranker
+    environment:
+      CORDOVA_ENV: development
+      CORDOVA_REDIS_URL: redis://redis:6379/0
+      CORDOVA_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      CORDOVA_KAFKA_BROKERS: redpanda:9092
+    secrets: [redis_password]
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      ranker-topic-init:
+        condition: service_completed_successfully
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    restart: unless-stopped
+
   mock-node:
     image: cordova-mock-node:0.1.0
     build:
@@ -153,6 +181,32 @@ services:
       - >-
         rpk topic describe cordova.account.usage.v1 --brokers redpanda:9092 >/dev/null 2>&1 ||
         rpk topic create --brokers redpanda:9092 --partitions 1 --replicas 1 cordova.account.usage.v1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+
+  ranker-topic-init:
+    image: redpandadata/redpanda:v24.3.17
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        ensure_topic() {
+          topic="$$1"
+          partitions="$$2"
+          if ! rpk topic describe "$$topic" --brokers redpanda:9092 >/dev/null 2>&1; then
+            rpk topic create --brokers redpanda:9092 --partitions "$$partitions" --replicas 1 "$$topic"
+          fi
+        }
+        ensure_topic cordova.node.events.v1 6
+        ensure_topic cordova.node.rank.v1 6
+        ensure_topic cordova.events.dlq.v1 1
     depends_on:
       redpanda:
         condition: service_healthy

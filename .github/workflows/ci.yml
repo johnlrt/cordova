@@ -38,7 +38,12 @@ jobs:
         env:
           CORDOVA_TEST_REDIS_URL: redis://127.0.0.1:6379/14
         run: make test-node-routing
-      - run: go build ./cmd/gateway ./cmd/mock-node
+      - name: Rank projection and replay integration
+        working-directory: .
+        env:
+          CORDOVA_TEST_REDIS_URL: redis://127.0.0.1:6379/14
+        run: make test-rank-fraud
+      - run: go build ./cmd/gateway ./cmd/mock-node ./cmd/ranker
       - name: Stop integration Redis
         if: always()
         run: docker stop cordova-ci-redis 2>/dev/null || true

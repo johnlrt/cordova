@@ -244,7 +244,7 @@ func (r *c3RequestRouter) freshProfiles(ctx context.Context, manifest NodeCatalo
 		var profile nodeCapacityProfile
 		if decodeStrictBytes(profileBytes, &profile) != nil || profile.NodeID != peer.nodeID ||
 			profile.ModelID != manifest.Model.ID || profile.CatalogVersion != r.catalog.Version ||
-			profile.ArtifactSHA256 != manifest.ArtifactSHA256 || !profile.BenchmarkPassed || profile.Rank == 0 ||
+			profile.ArtifactSHA256 != manifest.ArtifactSHA256 || !profile.BenchmarkPassed ||
 			profile.VerifiedSlots == 0 || profile.VerifiedSlots > 64 || profile.VerifiedCapacityBytes < requiredCapacity ||
 			profile.VerifiedCapacityBytes > (1<<53)-1 || profile.BenchmarkedAtUnix <= 0 || profile.BenchmarkedAtUnix > now.Unix() ||
 			profile.ExpiresAtUnix <= now.Unix() || profile.ExpiresAtUnix > profile.BenchmarkedAtUnix+int64(nodeCapacityProfileMaxAge.Seconds()) ||
@@ -252,6 +252,14 @@ func (r *c3RequestRouter) freshProfiles(ctx context.Context, manifest NodeCatalo
 			profile.VerifiedTokensPerSecondMilli < 2_000 || profile.VerifiedTokensPerSecondMilli > (1<<53)-1 {
 			continue
 		}
+		rank, err := r.nodes.routingRank(ctx, peer.nodeID, profile.Rank)
+		if err != nil {
+			return nil, err
+		}
+		if rank <= 0 || rank > 100 {
+			continue
+		}
+		profile.Rank = rank
 		peer.profile = profile
 		result = append(result, peer)
 	}

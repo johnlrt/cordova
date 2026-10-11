@@ -12,7 +12,8 @@ func readyWindow(now time.Time) Window {
 		BenchmarkAt:                 now.Add(-time.Hour),
 		Now:                         now,
 		TestedCapacityBytes:         12 * 1024 * 1024 * 1024,
-		TokensPerSecondMilli:        50_000,
+		VerifiedOutputTokens:        250,
+		BenchmarkElapsedMS:          5_000,
 		ConnectedHeartbeatIntervals: 50,
 		ExpectedHeartbeatIntervals:  100,
 		P50ServerLatencyMillis:      1_000,
@@ -77,7 +78,8 @@ func TestComputeCapsMetricsAndUsesSuccessPrior(t *testing.T) {
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 	window := readyWindow(now)
 	window.TestedCapacityBytes = 48 * 1024 * 1024 * 1024
-	window.TokensPerSecondMilli = 200_000
+	window.VerifiedOutputTokens = 1_000_000
+	window.BenchmarkElapsedMS = 1_000
 	window.ConnectedHeartbeatIntervals = 200
 	window.P50ServerLatencyMillis = 3_000
 	window.SuccessfulAttempts = 9
@@ -99,6 +101,7 @@ func TestComputeRejectsInvalidObservedWindow(t *testing.T) {
 		"latency exceeds finished": func(w *Window) { w.LatencySamples = w.FinishedAttempts + 1 },
 		"zero expected intervals":  func(w *Window) { w.ExpectedHeartbeatIntervals = 0 },
 		"zero tested capacity":     func(w *Window) { w.TestedCapacityBytes = 0 },
+		"zero benchmark duration":  func(w *Window) { w.BenchmarkElapsedMS = 0 },
 		"future benchmark":         func(w *Window) { w.BenchmarkAt = now.Add(time.Second) },
 	}
 	for name, mutate := range tests {
