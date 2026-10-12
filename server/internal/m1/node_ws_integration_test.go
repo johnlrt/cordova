@@ -163,7 +163,7 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	if err != nil || !strings.Contains(storedState, `"state":"loaded"`) {
 		t.Fatalf("model state was not persisted: value=%q err=%v", storedState, err)
 	}
-	modelEvents, _, err := store.LiveEvents(ctx, ownerID.String(), liveCursor)
+	modelEvents, modelCursor, err := store.LiveEvents(ctx, ownerID.String(), liveCursor)
 	if err != nil || len(modelEvents) != 2 || modelEvents[0].Topic != "nodes" || modelEvents[0].ResourceID != node.ID ||
 		modelEvents[0].Revision != 3 || modelEvents[1].Topic != "nodes" || modelEvents[1].ResourceID != node.ID || modelEvents[1].Revision != 4 {
 		t.Fatalf("model-state and heartbeat invalidations=%+v err=%v", modelEvents, err)
@@ -177,7 +177,7 @@ func TestNodeWebSocketHandshakeCatalogHeartbeatAndSessionFencing(t *testing.T) {
 	if firstSession == secondSession {
 		t.Fatal("reconnect reused the previous session ID")
 	}
-	reconnectEvents, _, err := store.LiveEvents(ctx, ownerID.String(), liveCursor)
+	reconnectEvents, _, err := store.LiveEvents(ctx, ownerID.String(), modelCursor)
 	if err != nil || len(reconnectEvents) != 1 || reconnectEvents[0].Topic != "nodes" || reconnectEvents[0].ResourceID != node.ID || reconnectEvents[0].Revision != 5 {
 		t.Fatalf("replacement-session invalidation=%+v err=%v", reconnectEvents, err)
 	}

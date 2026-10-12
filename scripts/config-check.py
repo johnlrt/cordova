@@ -25,7 +25,16 @@ def main() -> int:
             fail("docker compose config failed; run make bootstrap-dev and inspect the Compose files")
         config = json.loads(result.stdout)
         services = config.get("services", {})
-        expected = {"gateway", "mock-node", "redis", "redpanda", "usage-topic-init", "edge"}
+        expected = {
+            "gateway",
+            "ranker",
+            "mock-node",
+            "redis",
+            "redpanda",
+            "usage-topic-init",
+            "ranker-topic-init",
+            "edge",
+        }
         if set(services) != expected:
             fail("Compose service inventory does not match the M1 stack")
         topic_init = services["usage-topic-init"]
@@ -71,7 +80,7 @@ def main() -> int:
             fail("the edge must bridge the loopback-published front and isolated private networks")
         if service_networks.get("gateway") != {"private"}:
             fail("the gateway must remain isolated from the host-facing front network")
-        for name in {"mock-node", "redis", "redpanda", "usage-topic-init"}:
+        for name in {"mock-node", "redis", "redpanda", "usage-topic-init", "ranker", "ranker-topic-init"}:
             if service_networks.get(name) != {"private"}:
                 fail(f"{name} must attach only to the isolated private network")
 
