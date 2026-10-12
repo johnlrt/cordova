@@ -127,7 +127,7 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 
 `POST /api/nodes/{id}/models/{model_id}/prepare` проверяет session, CSRF и node ownership, принимает только model slug из подписанного каталога и передаёт подготовку общему C3 router. Для on-disk и absent моделей используется существующая session-fenced модельная блокировка; скачивания ограничены общим Redis permit и после загрузки требуют server-side benchmark. Loaded модель без свежего профиля запускает benchmark; с профилем возвращается `ready`. Команда не резервирует inference-запрос и не принимает путь, URL или хеш от браузера.
 
-Workflow gateway теперь поднимает изолированный Redis `7.4.2-alpine3.21` с AOF/`appendfsync always`, задаёт `CORDOVA_TEST_REDIS_URL`, запускает полный Go race suite и `make test-node-routing`. Этот workflow-конфиг ещё не исполнен hosted GitHub Actions. Реальная C3-нода, подписанный production catalog, квалифицированный GGUF, tokenizer parity и remote-session routing races остаются непроверенными.
+Workflow gateway поднимает изолированный Redis `7.4.2-alpine3.21` с AOF/`appendfsync always`, задаёт `CORDOVA_TEST_REDIS_URL` и запускает полный Go race suite и `make test-node-routing`. Hosted GitHub Actions run `38266282790` прошёл эти проверки. Реальная C3-нода, подписанный production catalog, квалифицированный GGUF, tokenizer parity и remote-session routing races остаются непроверенными.
 
 ## Проверка C4 live node invalidations — 2026-10-11
 
@@ -140,7 +140,7 @@ Workflow gateway теперь поднимает изолированный Redi
 | `npm.cmd run build` | Production static build прошёл | Запущен с повышенным доступом после sandbox `EPERM` при чтении `node_modules`. |
 | Go `fmt`, `test`, `vet` | Прошли на `go1.27.2 windows/amd64`; после sandbox-отказа на loopback suite повторён с разрешёнными локальными тестовыми сокетами | Redis-backed cases без `CORDOVA_TEST_REDIS_URL` пропущены; новая проверка session/heartbeat/model-state invalidations требует отдельного Redis/CI execution. |
 
-C4 теперь пропускает подписанные `nodes` invalidations и публикует account-scoped metadata events при node approval, rename, revoke, session start/close, heartbeat и model-state changes. UI refetch-ит owner REST snapshot, объединяет частые invalidations и опрашивает REST раз в 30 секунд для статуса, который меняется после heartbeat TTL. Живой Redis/WebSocket delivery и hosted CI для этой ревизии остаются непроверенными.
+C4 теперь пропускает подписанные `nodes` invalidations и публикует account-scoped metadata events при node approval, rename, revoke, session start/close, heartbeat и model-state changes. Hosted run `38266282790` прошёл Redis-backed Go integration tests для публикации событий. UI refetch-ит owner REST snapshot, объединяет частые invalidations и опрашивает REST раз в 30 секунд для статуса, который меняется после heartbeat TTL; полный browser workflow с реальной C3-нодой ещё не проверен.
 
 ## C6 rank formula core — 2026-10-11
 
@@ -158,6 +158,10 @@ C4 теперь пропускает подписанные `nodes` invalidation
 | `go build ./...` | Прошла локально на закреплённом Go 1.27.2 Windows/amd64 | Компиляция не исполняет Go tests или Redis Lua. |
 | `go test ./...` | Прошла с разрешёнными loopback-сокетами; включает новые unit checks для gross-проводок, expense и дневного replay | Без Redis переменная `CORDOVA_TEST_REDIS_URL` отсутствует, поэтому интеграционные тесты были пропущены. |
 | `go vet ./...` | Прошла локально на закреплённом Go 1.27.2 Windows/amd64 | Не исполняет Redis Lua. |
-| Redis budget integration / restart replay | Не запускалась в этой сессии; локальных `redis-server`, `redis-cli` и Docker нет в `PATH` | Hosted CI должен проверить атомарный отказ при исчерпании лимита, конкурентные резервы, spend/release, повтор операций и Verify/Recover на Redis с AOF. |
+| Redis budget integration / restart replay | Hosted GitHub Actions run `38266282790` прошёл `go test -race -count=1 ./...` с Redis `7.4.2-alpine3.21`, AOF и `appendfsync always`; новые атомарные reservation/spend/release/replay cases включены в suite | Проверена закреплённая CI-версия на одном Redis без реплики; Redis process-kill/replica fsync и production `WAITAOF 1 1` остаются непроверенными. |
 
 В journal добавлены точные суточные счётчики, атомарный cap-check, привязка резерва к UTC-дню, сверка gross revenue с сохранённым terminal request и отдельная `verification_expense` проводка. Вызов записи seed пока требует реального источника подтверждённого operator transfer; canary scheduling, A11 sampling и fraud hold/release остаются открытыми.
+
+## M1 hosted acceptance — 2026-10-12
+
+Hosted GitHub Actions run `38266282790` on commit `46af54a` passed all jobs: `contracts`, `frontend`, `gateway`, `frontend-m1`, and `node`. The gateway job passed `go test -race -count=1 ./...` with Redis integration, `make test-node-routing`, `make test-rank-fraud`, Go builds and dependency audit. The isolated M1 job passed Compose preparation, frontend registration/live usage through nginx, `make smoke`, and `make test-edge`; the Rust job passed tests, lint and dependency audit. This closes the M1 mock-node acceptance gate and verifies the current CI workflow. Real-model/tokenizer parity, wallet operations, production durability, and M2+ gates remain open.

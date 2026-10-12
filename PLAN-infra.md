@@ -291,7 +291,7 @@ On a failed deployment, preserve service/ledger/wallet state, close affected cir
 
 ## Next actions
 
-- **IN0 (Stage 2 / I0, implemented):** Run the contract checker in the pull-request workflow. A separate Go gateway job uses an isolated versioned Redis container for Redis integration tests; the schema-only contract job remains independent of Docker and external services. **Still needs:** a successful hosted CI run for the current workflow revision.
+- **IN0 (Stage 2 / I0, verified):** The pull-request workflow runs the contract checker independently of Docker and runs the Go race/integration suite against isolated versioned Redis. Hosted GitHub Actions run `38266282790` passed all jobs, including Rust, Go, frontend, security audit and M1-stack checks.
 - **IN1 (I0b):** Pin versions/digests and implement configuration validation. **Done when:** clean-clone `make config-check` rejects absent production secrets and invalid network/model combinations.
 - **IN2 (I1/I2):** Bring up private Compose and nginx with mock-node SSE. **Done when:** `make smoke && make network-check && make test-edge` passes.
 - **IN3 (I3):** Configure persistence/replica and consistent encrypted remote backups. **Done when:** a scratch restore passes `make restore-drill` and records measured RPO/RTO.

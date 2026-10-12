@@ -47,5 +47,6 @@ make test-edge
 
 - `make contracts-check` validates REST route inventory, C3/C4 type registries, tokenizer contracts and positive/negative fixtures.
 - CI runs Go formatting, vet, race tests, builds both Go commands, tests and lints the Rust node, checks frontend types/tests/build and all contracts, and audits Go/Rust/npm dependencies. A separate `frontend-m1` job boots the isolated HTTPS Compose stack and exercises registration, a synthetic request, live usage refresh, account isolation, and edge smoke checks through nginx.
-- `make smoke`, `make network-check`, and `make test-edge` require the Compose stack and have not been run unless their output is recorded for this checkout.
+- Hosted GitHub Actions run `38266282790` passed all jobs on 2026-10-12: the Redis-backed Go race/integration suite, C3 routing and ranker replay checks, Rust tests/lint/audit, frontend checks, and the isolated `frontend-m1` stack including `make smoke`, live usage refresh, and `make test-edge`. This verifies the mock-node vertical slice only.
+- The current Windows checkout lacks Docker, so Compose checks have not run locally. Hosted run `38266282790` covers `make smoke` and `make test-edge`; `make network-check` still needs an execution record.
 - M0 Redis/Lua/WAITAOF, Kafka duplication/recovery, tokenizer/model parity, SOCKS5h, and wallet probes remain prerequisites for later milestones. No production secret, model artifact, wallet RPC, or public port is configured by the local stack.
