@@ -331,6 +331,10 @@ func copyLedgerEntries(entries []Entry) []Entry {
 
 func cloneEntry(entry Entry) Entry {
 	entry.Postings = append([]Posting(nil), entry.Postings...)
+	if entry.VerificationBudget != nil {
+		change := *entry.VerificationBudget
+		entry.VerificationBudget = &change
+	}
 	return entry
 }
 
@@ -348,7 +352,9 @@ func validBucketAccount(bucket, account string) bool {
 	switch bucket {
 	case BucketAvailable, BucketReserved, BucketOwnerPending, BucketOwnerAvailable, BucketPayoutReserved:
 		return domainID(account)
-	case BucketCashHot, BucketEquity, BucketNetworkFee:
+	case BucketCashHot, BucketEquity, BucketNetworkFee, BucketVerificationExpense:
+		return account == ""
+	case BucketVerificationReserved:
 		return account == ""
 	default:
 		return false

@@ -150,3 +150,12 @@ C4 теперь пропускает подписанные `nodes` invalidation
 | `go test ./...` и `go vet ./...` | Прошли | Redis/Kafka интеграция ranker ещё отсутствует и этим прогоном не проверялась. |
 
 `server/internal/ranker` реализует `c6-v1`: точные рациональные вклады C/T/U/L/S с единственным округлением вниз, rank 10 до свежего benchmark и десяти outcomes, rank 0 для quarantine. `make test-rank-fraud` добавлен как целевой тест. Kafka node-event ingestion, 24-часовая Redis projection, rank-change outbox и fraud/canary controls остаются незакрытыми требованиями B8.
+
+## A19 durable verification budget slice — 2026-10-12
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| `go build ./...` | Прошла локально на закреплённом Go 1.27.2 Windows/amd64 | Компиляция не исполняет Go tests или Redis Lua. |
+| Redis budget integration / restart replay | Не запускалась в этой сессии | Проверить атомарный отказ при исчерпании лимита, конкурентные резервы, spend/release, повтор операций и Verify/Recover на Redis с AOF. |
+
+В journal добавлены точные суточные счётчики, атомарный cap-check, привязка резерва к UTC-дню, сверка gross revenue с сохранённым terminal request и отдельная `verification_expense` проводка. Вызов записи seed пока требует реального источника подтверждённого operator transfer; canary scheduling, A11 sampling и fraud hold/release остаются открытыми.

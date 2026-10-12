@@ -21,27 +21,30 @@ import (
 )
 
 var (
-	ErrInvalidOperation  = errors.New("invalid ledger operation")
-	ErrInsufficientFunds = errors.New("insufficient funds")
-	ErrSpendCapExceeded  = errors.New("daily spend cap exceeded")
-	ErrConflict          = errors.New("request accounting conflict")
-	ErrAlreadyTerminal   = errors.New("request is already terminal")
-	ErrRetryUnavailable  = errors.New("request retry is unavailable")
+	ErrInvalidOperation           = errors.New("invalid ledger operation")
+	ErrInsufficientFunds          = errors.New("insufficient funds")
+	ErrSpendCapExceeded           = errors.New("daily spend cap exceeded")
+	ErrVerificationBudgetExceeded = errors.New("daily verification budget exceeded")
+	ErrConflict                   = errors.New("request accounting conflict")
+	ErrAlreadyTerminal            = errors.New("request is already terminal")
+	ErrRetryUnavailable           = errors.New("request retry is unavailable")
 )
 
 const (
-	BucketAvailable        = "user.available"
-	BucketReserved         = "user.reserved"
-	BucketOwnerPending     = "owner.pending"
-	BucketOwnerAvailable   = "owner.available"
-	BucketPayoutReserved   = "owner.payout_reserved"
-	BucketCashHot          = "cash.hot"
-	BucketEquity           = "equity"
-	BucketNetworkFee       = "network_fee_expense"
-	maxAttempts            = 2
-	maxRequestInputTokens  = 1_000_000
-	maxRequestOutputTokens = 2_048
-	defaultModelID         = "cordova-chat-small-v1"
+	BucketAvailable            = "user.available"
+	BucketReserved             = "user.reserved"
+	BucketOwnerPending         = "owner.pending"
+	BucketOwnerAvailable       = "owner.available"
+	BucketPayoutReserved       = "owner.payout_reserved"
+	BucketCashHot              = "cash.hot"
+	BucketEquity               = "equity"
+	BucketNetworkFee           = "network_fee_expense"
+	BucketVerificationExpense  = "verification_expense"
+	BucketVerificationReserved = "platform.verification_reserved"
+	maxAttempts                = 2
+	maxRequestInputTokens      = 1_000_000
+	maxRequestOutputTokens     = 2_048
+	defaultModelID             = "cordova-chat-small-v1"
 )
 
 // Price is copied into a request at acceptance and remains fixed across retries.
@@ -115,17 +118,18 @@ type Posting struct {
 }
 
 type Entry struct {
-	ID           string    `json:"ledger_id"`
-	OperationID  string    `json:"operation_id"`
-	Kind         string    `json:"kind"`
-	RequestID    string    `json:"request_id,omitempty"`
-	AttemptID    string    `json:"attempt_id,omitempty"`
-	PriceVersion string    `json:"price_version,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	Postings     []Posting `json:"postings"`
-	ReferenceID  string    `json:"reference_id,omitempty"`
-	PreviousHash string    `json:"previous_hash"`
-	EntryHash    string    `json:"entry_hash"`
+	ID                 string                    `json:"ledger_id"`
+	OperationID        string                    `json:"operation_id"`
+	Kind               string                    `json:"kind"`
+	RequestID          string                    `json:"request_id,omitempty"`
+	AttemptID          string                    `json:"attempt_id,omitempty"`
+	PriceVersion       string                    `json:"price_version,omitempty"`
+	CreatedAt          time.Time                 `json:"created_at"`
+	Postings           []Posting                 `json:"postings"`
+	ReferenceID        string                    `json:"reference_id,omitempty"`
+	VerificationBudget *VerificationBudgetChange `json:"verification_budget,omitempty"`
+	PreviousHash       string                    `json:"previous_hash"`
+	EntryHash          string                    `json:"entry_hash"`
 }
 
 type RequestStatus string
@@ -375,6 +379,7 @@ func (l *Ledger) finishAttempt(requestID, attemptID string, outputTokens int64, 
 		return Entry{}, ErrConflict
 	}
 	var postings []Posting
+	var actualCost int64
 	newStatus := state.Status
 	if mode == "failure" {
 		if retryAllowed && len(state.Attempts) >= maxAttempts {
@@ -416,13 +421,19 @@ func (l *Ledger) finishAttempt(requestID, attemptID string, outputTokens int64, 
 			posting(BucketEquity, "", -quote.PlatformTake.Int64())}
 		cap.Reserved -= reservation.Int64()
 		cap.Spent += quote.ActualCost.Int64()
+		actualCost = quote.ActualCost.Int64()
 	}
 	if cap.Reserved < 0 || cap.Spent > cap.Limit || cap.Reserved > cap.Limit-cap.Spent {
 		return Entry{}, ErrConflict
 	}
 	state.Status = newStatus
-	entry, err := l.commit(Entry{OperationID: operationID, Kind: kind, RequestID: requestID, AttemptID: attemptID,
-		PriceVersion: state.Price.Version.String(), CreatedAt: at.UTC(), Postings: postings}, operationID, fingerprint)
+	entry := Entry{OperationID: operationID, Kind: kind, RequestID: requestID, AttemptID: attemptID,
+		PriceVersion: state.Price.Version.String(), CreatedAt: at.UTC(), Postings: postings}
+	if actualCost > 0 {
+		entry.VerificationBudget = &VerificationBudgetChange{Day: at.UTC().Format("2006-01-02"),
+			GrossRevenueDelta: signedAmount(actualCost), OperatorSeedDelta: "0", SpentDelta: "0", ReservedDelta: "0"}
+	}
+	entry, err = l.commit(entry, operationID, fingerprint)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -595,6 +606,9 @@ func (l *Ledger) commit(entry Entry, operationID, fingerprint string) (Entry, er
 	if operationID == "" || entry.Kind == "" || len(entry.Postings) < 2 {
 		return Entry{}, ErrInvalidOperation
 	}
+	if err := validateVerificationBudgetChange(entry); err != nil {
+		return Entry{}, err
+	}
 	sort.Slice(entry.Postings, func(i, j int) bool {
 		if entry.Postings[i].Bucket == entry.Postings[j].Bucket {
 			return entry.Postings[i].AccountID < entry.Postings[j].AccountID
@@ -604,7 +618,7 @@ func (l *Ledger) commit(entry Entry, operationID, fingerprint string) (Entry, er
 	var total big.Int
 	newBalances := make(map[string]int64, len(entry.Postings))
 	for _, p := range entry.Postings {
-		if p.Bucket == "" {
+		if !validBucketAccount(p.Bucket, p.AccountID) {
 			return Entry{}, ErrInvalidOperation
 		}
 		delta, err := parseSigned(p.Delta)

@@ -34,6 +34,218 @@ func (l *RedisLedger) CreditTest(ctx context.Context, accountID, creditID string
 	}})
 }
 
+// VerificationBudget reads one day's exact piconero counters. Admission must
+// still use ReserveVerificationBudget, whose cap check occurs in the journal's
+// atomic append script.
+func (l *RedisLedger) VerificationBudget(ctx context.Context, at time.Time) (VerificationBudget, error) {
+	if at.IsZero() {
+		return VerificationBudget{}, ErrInvalidOperation
+	}
+	if !l.journal.Ready() {
+		return VerificationBudget{}, ErrJournalCircuitOpen
+	}
+	day := at.UTC().Format("2006-01-02")
+	values, err := l.journal.client.HMGet(ctx, l.journal.verificationKey,
+		"gross:"+day, "seed:"+day, "spent:"+day, "reserved:"+day).Result()
+	if err != nil {
+		return VerificationBudget{}, l.journal.markUncertain(err)
+	}
+	if len(values) != 4 {
+		return VerificationBudget{}, l.journal.markUncertain(ErrInvalidSnapshot)
+	}
+	present := 0
+	for _, value := range values {
+		if value != nil {
+			present++
+		}
+	}
+	if present != 0 && present != len(values) {
+		return VerificationBudget{}, l.journal.markUncertain(ErrInvalidSnapshot)
+	}
+	read := func(index int) (domain.Piconero, error) {
+		value := values[index]
+		if value == nil {
+			return domain.NewPiconero(0)
+		}
+		text, ok := value.(string)
+		if !ok {
+			return domain.Piconero{}, ErrInvalidSnapshot
+		}
+		return domain.ParsePiconero(text)
+	}
+	gross, err := read(0)
+	if err != nil {
+		return VerificationBudget{}, l.journal.markUncertain(ErrInvalidSnapshot)
+	}
+	seed, err := read(1)
+	if err != nil {
+		return VerificationBudget{}, l.journal.markUncertain(ErrInvalidSnapshot)
+	}
+	spent, err := read(2)
+	if err != nil {
+		return VerificationBudget{}, l.journal.markUncertain(ErrInvalidSnapshot)
+	}
+	reserved, err := read(3)
+	if err != nil {
+		return VerificationBudget{}, l.journal.markUncertain(ErrInvalidSnapshot)
+	}
+	return CalculateVerificationBudget(VerificationBudgetState{GrossInferenceRevenue: gross, OperatorFundedSeed: seed,
+		Spent: spent, Reserved: reserved})
+}
+
+// FundOperatorVerificationSeed journals verified operator funding for the
+// A19 pre-revenue seed. Call only after the payment worker has independently
+// confirmed receipt of the operator transfer.
+func (l *RedisLedger) FundOperatorVerificationSeed(ctx context.Context, fundingID string, amount domain.Piconero, at time.Time) (Entry, error) {
+	if !validID(fundingID) || amount.Int64() <= 0 || amount.Int64() > MaxOperatorSeedVerificationBudget || at.IsZero() {
+		return Entry{}, ErrInvalidOperation
+	}
+	if !l.journal.Ready() {
+		return Entry{}, ErrJournalCircuitOpen
+	}
+	operationID := "verification-seed:" + fundingID
+	if prior, err := l.journal.Operation(ctx, operationID); err == nil {
+		if prior.Kind == "verification_seed" && prior.ReferenceID == fundingID && prior.VerificationBudget != nil &&
+			prior.VerificationBudget.OperatorSeedDelta == amount.String() {
+			return prior, nil
+		}
+		return Entry{}, ErrConflict
+	} else if !errors.Is(err, ErrRequestNotFound) {
+		return Entry{}, err
+	}
+	day := at.UTC().Format("2006-01-02")
+	return l.journal.Append(ctx, Entry{OperationID: operationID, Kind: "verification_seed",
+		ReferenceID: fundingID, CreatedAt: at.UTC(), Postings: []Posting{posting(BucketCashHot, "", amount.Int64()),
+			posting(BucketEquity, "", -amount.Int64())}, VerificationBudget: &VerificationBudgetChange{Day: day,
+			GrossRevenueDelta: "0", OperatorSeedDelta: amount.String(), SpentDelta: "0", ReservedDelta: "0"}})
+}
+
+// ReserveVerificationBudget atomically reserves verification spend against the
+// daily A19 cap and writes the matching financial reservation entry.
+func (l *RedisLedger) ReserveVerificationBudget(ctx context.Context, referenceID string, amount domain.Piconero, at time.Time) (Entry, error) {
+	if !validID(referenceID) || amount.Int64() <= 0 || at.IsZero() {
+		return Entry{}, ErrInvalidOperation
+	}
+	if !l.journal.Ready() {
+		return Entry{}, ErrJournalCircuitOpen
+	}
+	operationID := "verification-reserve:" + referenceID
+	if prior, err := l.journal.Operation(ctx, operationID); err == nil {
+		if prior.Kind == "verification_reserve" && prior.ReferenceID == referenceID && prior.VerificationBudget != nil &&
+			prior.VerificationBudget.ReservedDelta == amount.String() {
+			return prior, nil
+		}
+		return Entry{}, ErrConflict
+	} else if !errors.Is(err, ErrRequestNotFound) {
+		return Entry{}, err
+	}
+	day := at.UTC().Format("2006-01-02")
+	return l.journal.Append(ctx, Entry{OperationID: operationID, Kind: "verification_reserve",
+		ReferenceID: referenceID, CreatedAt: at.UTC(), Postings: []Posting{posting(BucketVerificationReserved, "", amount.Int64()),
+			posting(BucketEquity, "", -amount.Int64())}, VerificationBudget: &VerificationBudgetChange{Day: day,
+			GrossRevenueDelta: "0", OperatorSeedDelta: "0", SpentDelta: "0", ReservedDelta: amount.String()}})
+}
+
+// SettleVerificationBudget converts one live reservation into owner earnings.
+// The reservation's day and amount are read from the committed reserve entry;
+// callers cannot substitute a later date or draw on another verification.
+func (l *RedisLedger) SettleVerificationBudget(ctx context.Context, referenceID, ownerID string, actual domain.Piconero, at time.Time) (Entry, error) {
+	if !validID(referenceID) || !validID(ownerID) || at.IsZero() {
+		return Entry{}, ErrInvalidOperation
+	}
+	if !l.journal.Ready() {
+		return Entry{}, ErrJournalCircuitOpen
+	}
+	if actual.Int64() == 0 {
+		return l.ReleaseVerificationBudget(ctx, referenceID, at)
+	}
+	operationID := "verification-spend:" + referenceID
+	if prior, err := l.journal.Operation(ctx, operationID); err == nil {
+		if prior.Kind == "verification_spend" && prior.ReferenceID == referenceID && prior.VerificationBudget != nil &&
+			prior.VerificationBudget.SpentDelta == actual.String() && hasOwnerPosting(prior, ownerID, actual.Int64()) {
+			return prior, nil
+		}
+		return Entry{}, ErrConflict
+	} else if !errors.Is(err, ErrRequestNotFound) {
+		return Entry{}, err
+	}
+	reserve, amount, err := l.verificationReservation(ctx, referenceID)
+	if err != nil {
+		return Entry{}, err
+	}
+	if actual.Int64() > amount {
+		return Entry{}, ErrInvalidOperation
+	}
+	return l.journal.Append(ctx, Entry{OperationID: operationID, Kind: "verification_spend", ReferenceID: referenceID,
+		CreatedAt: at.UTC(), Postings: []Posting{posting(BucketVerificationReserved, "", -amount),
+			posting(BucketOwnerPending, ownerID, -actual.Int64()), posting(BucketEquity, "", amount),
+			posting(BucketVerificationExpense, "", actual.Int64())},
+		VerificationBudget: &VerificationBudgetChange{Day: reserve.VerificationBudget.Day, GrossRevenueDelta: "0",
+			OperatorSeedDelta: "0", SpentDelta: actual.String(), ReservedDelta: signedAmount(-amount)}})
+}
+
+// ReleaseVerificationBudget returns an unused verification reservation. The
+// transition is idempotent by reservation ID and is fenced by the same journal.
+func (l *RedisLedger) ReleaseVerificationBudget(ctx context.Context, referenceID string, at time.Time) (Entry, error) {
+	if !validID(referenceID) || at.IsZero() {
+		return Entry{}, ErrInvalidOperation
+	}
+	if !l.journal.Ready() {
+		return Entry{}, ErrJournalCircuitOpen
+	}
+	operationID := "verification-release:" + referenceID
+	if prior, err := l.journal.Operation(ctx, operationID); err == nil {
+		if prior.Kind == "verification_release" && prior.ReferenceID == referenceID && prior.VerificationBudget != nil {
+			return prior, nil
+		}
+		return Entry{}, ErrConflict
+	} else if !errors.Is(err, ErrRequestNotFound) {
+		return Entry{}, err
+	}
+	reserve, amount, err := l.verificationReservation(ctx, referenceID)
+	if err != nil {
+		return Entry{}, err
+	}
+	return l.journal.Append(ctx, Entry{OperationID: operationID, Kind: "verification_release", ReferenceID: referenceID,
+		CreatedAt: at.UTC(), Postings: []Posting{posting(BucketVerificationReserved, "", -amount), posting(BucketEquity, "", amount)},
+		VerificationBudget: &VerificationBudgetChange{Day: reserve.VerificationBudget.Day, GrossRevenueDelta: "0",
+			OperatorSeedDelta: "0", SpentDelta: "0", ReservedDelta: signedAmount(-amount)}})
+}
+
+func hasOwnerPosting(entry Entry, ownerID string, amount int64) bool {
+	for _, item := range entry.Postings {
+		if item.Bucket == BucketOwnerPending && item.AccountID == ownerID && item.Delta == signedAmount(-amount) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *RedisLedger) verificationReservation(ctx context.Context, referenceID string) (Entry, int64, error) {
+	if !l.journal.Ready() {
+		return Entry{}, 0, ErrJournalCircuitOpen
+	}
+	reserve, err := l.journal.Operation(ctx, "verification-reserve:"+referenceID)
+	if err != nil {
+		return Entry{}, 0, err
+	}
+	if reserve.Kind != "verification_reserve" || reserve.ReferenceID != referenceID || reserve.VerificationBudget == nil {
+		return Entry{}, 0, ErrConflict
+	}
+	current, err := l.journal.client.HGet(ctx, l.journal.verificationReservationsKey, referenceID).Result()
+	if err == redis.Nil {
+		return Entry{}, 0, ErrConflict
+	}
+	if err != nil {
+		return Entry{}, 0, l.journal.markUncertain(err)
+	}
+	amount, err := domain.ParsePiconero(reserve.VerificationBudget.ReservedDelta)
+	if err != nil || amount.Int64() <= 0 || current != amount.String()+"|"+reserve.VerificationBudget.Day {
+		return Entry{}, 0, l.journal.markUncertain(ErrInvalidSnapshot)
+	}
+	return reserve, amount.Int64(), nil
+}
+
 // Reserve atomically checks available funds and the acceptance-day cap,
 // journals the reservation, and waits for the configured WAITAOF barrier.
 func (l *RedisLedger) Reserve(ctx context.Context, params ReserveParams) (Reservation, Entry, error) {
@@ -230,6 +442,10 @@ func (l *RedisLedger) Settle(ctx context.Context, requestID, attemptID string, o
 			posting(BucketReserved, request.AccountID, reservation.Int64()), posting(BucketAvailable, request.AccountID, -quote.Refund.Int64()),
 			posting(BucketOwnerPending, attempt.Reservation.OwnerID, -quote.OwnerCredit.Int64()), posting(BucketEquity, "", -quote.PlatformTake.Int64()),
 		}}
+	if quote.ActualCost.Int64() > 0 {
+		entry.VerificationBudget = &VerificationBudgetChange{Day: at.UTC().Format("2006-01-02"),
+			GrossRevenueDelta: quote.ActualCost.String(), OperatorSeedDelta: "0", SpentDelta: "0", ReservedDelta: "0"}
+	}
 	cap := CapAdjustment{Key: request.AccountID + ":" + request.APIKeyID + ":" + request.AcceptedDay,
 		Limit: request.DailySpendCap.String(), SpentDelta: quote.ActualCost.String(), ReservedDelta: negativeAmount(reservation)}
 	return l.journal.AppendRequest(ctx, entry, requestID, revision, request, cap)

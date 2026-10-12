@@ -28,14 +28,16 @@ var (
 )
 
 const (
-	defaultJournalStream = "cv:v1:ledger"
-	defaultOutboxStream  = "cv:v1:outbox:financial"
-	defaultHeadKey       = "cv:v1:ledger:head"
-	defaultBalancesKey   = "cv:v1:balances"
-	defaultOperationsKey = "cv:v1:ledger:operations"
-	defaultRequestsKey   = "cv:v1:requests"
-	defaultCapsKey       = "cv:v1:spend-caps"
-	defaultBarrierKey    = "cv:v1:ledger:barrier"
+	defaultJournalStream               = "cv:v1:ledger"
+	defaultOutboxStream                = "cv:v1:outbox:financial"
+	defaultHeadKey                     = "cv:v1:ledger:head"
+	defaultBalancesKey                 = "cv:v1:balances"
+	defaultOperationsKey               = "cv:v1:ledger:operations"
+	defaultRequestsKey                 = "cv:v1:requests"
+	defaultCapsKey                     = "cv:v1:spend-caps"
+	defaultVerificationKey             = "cv:v1:verification:budgets"
+	defaultVerificationReservationsKey = "cv:v1:verification:reservations"
+	defaultBarrierKey                  = "cv:v1:ledger:barrier"
 )
 
 // DefaultUsagePendingKey is the Redis set populated atomically by terminal
@@ -46,22 +48,24 @@ const DefaultUsagePendingKey = "cv:v1:usage:pending"
 // entries. Each append uses one dedicated connection for EVAL and WAITAOF.
 // It does not decide request policy; callers calculate and validate postings.
 type RedisJournal struct {
-	client          *redis.Client
-	requireReplica  bool
-	uncertain       atomic.Bool
-	recovered       atomic.Bool
-	recoveryMu      sync.Mutex
-	write           *redis.Script
-	stream          string
-	outbox          string
-	headKey         string
-	balancesKey     string
-	operationsKey   string
-	requestsKey     string
-	capsKey         string
-	barrierKey      string
-	usagePendingKey string
-	faultInjector   func(redisJournalFaultStage, string) error
+	client                      *redis.Client
+	requireReplica              bool
+	uncertain                   atomic.Bool
+	recovered                   atomic.Bool
+	recoveryMu                  sync.Mutex
+	write                       *redis.Script
+	stream                      string
+	outbox                      string
+	headKey                     string
+	balancesKey                 string
+	operationsKey               string
+	requestsKey                 string
+	capsKey                     string
+	verificationKey             string
+	verificationReservationsKey string
+	barrierKey                  string
+	usagePendingKey             string
+	faultInjector               func(redisJournalFaultStage, string) error
 }
 
 type redisJournalFaultStage string
@@ -78,7 +82,8 @@ func NewRedisJournal(client *redis.Client, requireReplica bool) (*RedisJournal, 
 	return &RedisJournal{client: client, requireReplica: requireReplica, write: redis.NewScript(appendLedgerScript),
 		stream: defaultJournalStream, outbox: defaultOutboxStream, headKey: defaultHeadKey,
 		balancesKey: defaultBalancesKey, operationsKey: defaultOperationsKey, requestsKey: defaultRequestsKey,
-		capsKey: defaultCapsKey, barrierKey: defaultBarrierKey, usagePendingKey: DefaultUsagePendingKey}, nil
+		capsKey: defaultCapsKey, verificationKey: defaultVerificationKey, verificationReservationsKey: defaultVerificationReservationsKey,
+		barrierKey: defaultBarrierKey, usagePendingKey: DefaultUsagePendingKey}, nil
 }
 
 func (j *RedisJournal) Ready() bool { return j.recovered.Load() && !j.uncertain.Load() }
@@ -216,7 +221,7 @@ func (j *RedisJournal) append(ctx context.Context, entry Entry, requestID string
 			hasRequest, requestID, requestRevision, requestJSON, capKey, capLimit, spentDelta, reservedDelta}
 		args = append(args, postingsAsArgs(entry.Postings)...)
 		result, err := j.write.Run(ctx, conn, []string{j.headKey, j.balancesKey, j.operationsKey, j.stream, j.outbox,
-			j.requestsKey, j.capsKey, j.usagePendingKey}, args...).Slice()
+			j.requestsKey, j.capsKey, j.usagePendingKey, j.verificationKey, j.verificationReservationsKey}, args...).Slice()
 		if err != nil {
 			return Entry{}, j.markUncertain(err)
 		}
@@ -245,6 +250,10 @@ func (j *RedisJournal) append(ctx context.Context, entry Entry, requestID string
 			return Entry{}, ErrSpendCapExceeded
 		case -5:
 			return Entry{}, ErrInsufficientFunds
+		case -6:
+			return Entry{}, ErrVerificationBudgetExceeded
+		case -7:
+			return Entry{}, ErrConflict
 		default:
 			return Entry{}, j.markUncertain(ErrInvalidOperation)
 		}
@@ -512,6 +521,16 @@ func (j *RedisJournal) Verify(ctx context.Context) error {
 	previous := ""
 	balances := make(map[string]int64)
 	operations := make(map[string]string)
+	verificationTotals := make(map[string]verificationBudgetTotals)
+	verificationReservations := make(map[string]verificationReservationState)
+	storedRequests, err := j.scanRequests(ctx)
+	if err != nil {
+		return err
+	}
+	requestCheckpoints := make(map[string]RequestCheckpoint, len(storedRequests))
+	for _, request := range storedRequests {
+		requestCheckpoints[request.id] = request.checkpoint
+	}
 	start := "-"
 	var entryCount int64
 	for {
@@ -537,6 +556,26 @@ func (j *RedisJournal) Verify(ctx context.Context) error {
 				entry.PreviousHash != previous || operations[entry.OperationID] != "" {
 				return j.markUncertain(ErrInvalidSnapshot)
 			}
+			if entry.Kind == "settle" || entry.Kind == "cancel" {
+				if checkpoint, exists := requestCheckpoints[entry.RequestID]; exists {
+					attempt, attemptExists := checkpoint.Attempts[entry.AttemptID]
+					if !attemptExists {
+						return j.markUncertain(ErrInvalidSnapshot)
+					}
+					quote, quoteErr := CalculateQuote(checkpoint.InputTokens, attempt.OutputTokens, checkpoint.MaxOutputTokens,
+						checkpoint.Price, entry.Kind == "cancel")
+					reserved, reserveErr := domain.ParsePiconero(attempt.Reservation.Amount)
+					if quoteErr != nil || reserveErr != nil {
+						return j.markUncertain(ErrInvalidSnapshot)
+					}
+					cap := CapAdjustment{Key: checkpoint.AccountID + ":" + checkpoint.APIKeyID + ":" + checkpoint.AcceptedDay,
+						Limit: checkpoint.DailySpendCap.String(), SpentDelta: quote.ActualCost.String(),
+						ReservedDelta: negativeAmount(reserved)}
+					if validateRequestTransition(entry, entry.RequestID, checkpoint, cap) != nil {
+						return j.markUncertain(ErrInvalidSnapshot)
+					}
+				}
+			}
 			hash, err := hashEntry(entry)
 			if err != nil || hash != entry.EntryHash {
 				return j.markUncertain(ErrInvalidSnapshot)
@@ -558,6 +597,41 @@ func (j *RedisJournal) Verify(ctx context.Context) error {
 			}
 			if total.Sign() != 0 {
 				return j.markUncertain(ErrInvalidSnapshot)
+			}
+			if change := entry.VerificationBudget; change != nil {
+				if err := applyVerificationBudgetChange(verificationTotals, change); err != nil {
+					return j.markUncertain(ErrInvalidSnapshot)
+				}
+				if entry.Kind == "verification_reserve" {
+					totals := verificationTotals[change.Day]
+					gross, _ := domain.NewPiconero(totals.grossRevenue)
+					seed, _ := domain.NewPiconero(totals.operatorSeed)
+					spent, _ := domain.NewPiconero(totals.spent)
+					reserved, _ := domain.NewPiconero(totals.reserved)
+					budget, budgetErr := CalculateVerificationBudget(VerificationBudgetState{GrossInferenceRevenue: gross,
+						OperatorFundedSeed: seed, Spent: spent, Reserved: reserved})
+					if budgetErr != nil || totals.spent > budget.Limit.Int64() || totals.reserved > budget.Limit.Int64()-totals.spent {
+						return j.markUncertain(ErrInvalidSnapshot)
+					}
+				}
+				reservedDelta, parseErr := parseSigned(change.ReservedDelta)
+				if parseErr != nil {
+					return j.markUncertain(ErrInvalidSnapshot)
+				}
+				if reservedDelta != 0 {
+					prior := verificationReservations[entry.ReferenceID]
+					if reservedDelta > 0 {
+						if prior.amount != 0 || entry.Kind != "verification_reserve" || reservedDelta > domain.MaxPiconero {
+							return j.markUncertain(ErrInvalidSnapshot)
+						}
+						verificationReservations[entry.ReferenceID] = verificationReservationState{day: change.Day, amount: reservedDelta}
+					} else if prior.amount <= 0 || prior.day != change.Day || -reservedDelta != prior.amount ||
+						(entry.Kind != "verification_spend" && entry.Kind != "verification_release") {
+						return j.markUncertain(ErrInvalidSnapshot)
+					} else {
+						delete(verificationReservations, entry.ReferenceID)
+					}
+				}
 			}
 			operations[entry.OperationID] = encoded
 			previous = entry.EntryHash
@@ -608,6 +682,46 @@ func (j *RedisJournal) Verify(ctx context.Context) error {
 	}
 	for key, expected := range balances {
 		if storedBalances[key] != strconv.FormatInt(expected, 10) {
+			return j.markUncertain(ErrInvalidSnapshot)
+		}
+	}
+	storedVerification, err := scanHash(ctx, j.client, j.verificationKey)
+	if err != nil {
+		return j.markUncertain(err)
+	}
+	expectedVerification := make(map[string]string, len(verificationTotals)*4)
+	var expectedReservedBalance int64
+	for day, totals := range verificationTotals {
+		var ok bool
+		expectedReservedBalance, ok = checkedAdd(expectedReservedBalance, totals.reserved)
+		if !ok || expectedReservedBalance > domain.MaxPiconero {
+			return j.markUncertain(ErrInvalidSnapshot)
+		}
+		expectedVerification["gross:"+day] = strconv.FormatInt(totals.grossRevenue, 10)
+		expectedVerification["seed:"+day] = strconv.FormatInt(totals.operatorSeed, 10)
+		expectedVerification["spent:"+day] = strconv.FormatInt(totals.spent, 10)
+		expectedVerification["reserved:"+day] = strconv.FormatInt(totals.reserved, 10)
+	}
+	if len(storedVerification) != len(expectedVerification) {
+		return j.markUncertain(ErrInvalidSnapshot)
+	}
+	for field, expected := range expectedVerification {
+		if storedVerification[field] != expected {
+			return j.markUncertain(ErrInvalidSnapshot)
+		}
+	}
+	if balances[BucketVerificationReserved+":"] != expectedReservedBalance {
+		return j.markUncertain(ErrInvalidSnapshot)
+	}
+	storedReservations, err := scanHash(ctx, j.client, j.verificationReservationsKey)
+	if err != nil {
+		return j.markUncertain(err)
+	}
+	if len(storedReservations) != len(verificationReservations) {
+		return j.markUncertain(ErrInvalidSnapshot)
+	}
+	for referenceID, expected := range verificationReservations {
+		if storedReservations[referenceID] != strconv.FormatInt(expected.amount, 10)+"|"+expected.day {
 			return j.markUncertain(ErrInvalidSnapshot)
 		}
 	}
@@ -815,6 +929,9 @@ func validateJournalEntry(entry Entry) error {
 		entry.AttemptID != "" && !validID(entry.AttemptID) || entry.PriceVersion != "" && !validID(entry.PriceVersion) {
 		return ErrInvalidOperation
 	}
+	if err := validateVerificationBudgetChange(entry); err != nil {
+		return err
+	}
 	var total big.Int
 	for _, item := range entry.Postings {
 		if !validBucketAccount(item.Bucket, item.AccountID) {
@@ -934,6 +1051,15 @@ func validateRequestTransition(entry Entry, requestID string, request RequestChe
 	if spentDelta != expectedSpent || reservedDelta != expectedReserved || !samePostings(entry.Postings, expected) {
 		return ErrInvalidOperation
 	}
+	if expectedSpent > 0 {
+		change := entry.VerificationBudget
+		if change == nil || change.Day != entry.CreatedAt.UTC().Format("2006-01-02") || change.GrossRevenueDelta != strconv.FormatInt(expectedSpent, 10) ||
+			change.OperatorSeedDelta != "0" || change.SpentDelta != "0" || change.ReservedDelta != "0" {
+			return ErrInvalidOperation
+		}
+	} else if entry.VerificationBudget != nil {
+		return ErrInvalidOperation
+	}
 	return nil
 }
 
@@ -1006,8 +1132,8 @@ const appendLedgerScript = `
 local function keytype(key)
   return redis.call('TYPE', key).ok
 end
-local expected = {'string','hash','hash','stream','stream','hash','hash','set'}
-for i=1,8 do
+local expected = {'string','hash','hash','stream','stream','hash','hash','set','hash','hash'}
+for i=1,10 do
   local t=keytype(KEYS[i])
   if t~='none' and t~=expected[i] then return redis.error_reply('CORDOVA_WRONG_LEDGER_KEY_TYPE') end
 end
@@ -1192,6 +1318,7 @@ local nextSpent=nil
 local nextReserved=nil
 local effectiveLimit=nil
 local terminalRequest=false
+local verificationGrossExpected=nil
 if hasRequest=='0' then
   if requestID~='' or expectedRevision~='0' or requestJSON~='' or capKey~='' or capLimit~='0' or spentDelta~='0' or reservedDelta~='0' then
     return redis.error_reply('CORDOVA_INVALID_EMPTY_REQUEST_STATE')
@@ -1315,6 +1442,7 @@ elseif hasRequest=='1' then
     local actual=addSigned(inputCost,outputCost)
     if isCancel and selected.output_tokens==0 then actual='0' end
     if not validUnsigned(actual) or cmpAbs(actual,amount)>0 then return redis.error_reply('CORDOVA_SETTLEMENT_AMOUNT_MISMATCH') end
+    verificationGrossExpected=actual
     local refund=addSigned(amount,negativeUnsigned(actual))
     local ownerProduct=mulSmall(actual,requestObject.price.owner_share_bps)
     local ownerCredit=divSmall(ownerProduct,10000)
@@ -1371,6 +1499,165 @@ else
   return redis.error_reply('CORDOVA_INVALID_REQUEST_FLAG')
 end
 
+local verificationChange=recordObject.verification_budget
+local verificationFields=nil
+local verificationReferenceID=nil
+local verificationReferenceValue=nil
+local function validUUID(value)
+  if type(value)~='string' or #value~=36 or string.sub(value,9,9)~='-' or string.sub(value,14,14)~='-' or
+     string.sub(value,19,19)~='-' or string.sub(value,24,24)~='-' then return false end
+  local compact=string.gsub(value,'%-','')
+  local variant=string.sub(compact,17,17)
+  return #compact==32 and string.match(compact,'^[0-9a-f]+$')~=nil and string.sub(compact,13,13)=='4' and
+    (variant=='8' or variant=='9' or variant=='a' or variant=='b')
+end
+if verificationChange~=nil then
+  if type(verificationChange)~='table' or type(verificationChange.utc_day)~='string' or
+     #verificationChange.utc_day~=10 or string.match(verificationChange.utc_day,'^%d%d%d%d%-%d%d%-%d%d$')==nil or
+     not validSigned(verificationChange.gross_revenue_delta_piconero) or
+     not validSigned(verificationChange.operator_seed_delta_piconero) or
+     not validSigned(verificationChange.spent_delta_piconero) or
+     not validSigned(verificationChange.reserved_delta_piconero) then
+    return redis.error_reply('CORDOVA_INVALID_VERIFICATION_BUDGET_CHANGE')
+  end
+  local grossDelta=verificationChange.gross_revenue_delta_piconero
+  local seedDelta=verificationChange.operator_seed_delta_piconero
+  local verifySpentDelta=verificationChange.spent_delta_piconero
+  local verifyReservedDelta=verificationChange.reserved_delta_piconero
+  local referenceID=recordObject.reference_id
+  if recordObject.kind=='settle' or recordObject.kind=='cancel' then
+    if hasRequest~='1' or recordObject.request_id==nil or grossDelta=='0' or string.sub(grossDelta,1,1)=='-' or
+       not verificationGrossExpected or grossDelta~=verificationGrossExpected or
+       type(recordObject.created_at)~='string' or string.sub(recordObject.created_at,1,10)~=verificationChange.utc_day or
+       seedDelta~='0' or verifySpentDelta~='0' or verifyReservedDelta~='0' then
+      return redis.error_reply('CORDOVA_INVALID_VERIFICATION_REVENUE')
+    end
+  elseif recordObject.kind=='verification_seed' then
+    if hasRequest~='0' or not validUUID(referenceID) or seedDelta=='0' or
+       string.sub(seedDelta,1,1)=='-' or grossDelta~='0' or verifySpentDelta~='0' or verifyReservedDelta~='0' or
+       type(recordObject.created_at)~='string' or string.sub(recordObject.created_at,1,10)~=verificationChange.utc_day then
+      return redis.error_reply('CORDOVA_INVALID_VERIFICATION_SEED')
+    end
+  elseif recordObject.kind=='verification_reserve' then
+    if hasRequest~='0' or not validUUID(referenceID) or verifyReservedDelta=='0' or
+       string.sub(verifyReservedDelta,1,1)=='-' or grossDelta~='0' or seedDelta~='0' or verifySpentDelta~='0' or
+       type(recordObject.created_at)~='string' or string.sub(recordObject.created_at,1,10)~=verificationChange.utc_day then
+      return redis.error_reply('CORDOVA_INVALID_VERIFICATION_RESERVATION')
+    end
+    verificationReferenceID=referenceID
+  elseif recordObject.kind=='verification_spend' then
+    if hasRequest~='0' or not validUUID(referenceID) or verifyReservedDelta=='0' or
+       string.sub(verifyReservedDelta,1,1)~='-' or verifySpentDelta=='0' or string.sub(verifySpentDelta,1,1)=='-' or
+       grossDelta~='0' or seedDelta~='0' then
+      return redis.error_reply('CORDOVA_INVALID_VERIFICATION_SPEND')
+    end
+    local released=string.sub(verifyReservedDelta,2)
+    if cmpAbs(verifySpentDelta,released)>0 then return redis.error_reply('CORDOVA_VERIFICATION_SPEND_EXCEEDS_RESERVE') end
+    verificationReferenceID=referenceID
+  elseif recordObject.kind=='verification_release' then
+    if hasRequest~='0' or not validUUID(referenceID) or verifyReservedDelta=='0' or
+       string.sub(verifyReservedDelta,1,1)~='-' or grossDelta~='0' or seedDelta~='0' or verifySpentDelta~='0' then
+      return redis.error_reply('CORDOVA_INVALID_VERIFICATION_RELEASE')
+    end
+    verificationReferenceID=referenceID
+  else
+    return redis.error_reply('CORDOVA_INVALID_VERIFICATION_BUDGET_KIND')
+  end
+
+  local day=verificationChange.utc_day
+  local gross=redis.call('HGET',KEYS[9],'gross:'..day) or '0'
+  local seed=redis.call('HGET',KEYS[9],'seed:'..day) or '0'
+  local spent=redis.call('HGET',KEYS[9],'spent:'..day) or '0'
+  local reserved=redis.call('HGET',KEYS[9],'reserved:'..day) or '0'
+  if not validUnsigned(gross) or not validUnsigned(seed) or not validUnsigned(spent) or not validUnsigned(reserved) then
+    return redis.error_reply('CORDOVA_INVALID_VERIFICATION_BUDGET_STATE')
+  end
+  local nextGross=addSigned(gross,grossDelta)
+  local nextSeed=addSigned(seed,seedDelta)
+  local nextVerifySpent=addSigned(spent,verifySpentDelta)
+  local nextVerifyReserved=addSigned(reserved,verifyReservedDelta)
+  if not validUnsigned(nextGross) or not validUnsigned(nextSeed) or not validUnsigned(nextVerifySpent) or
+     not validUnsigned(nextVerifyReserved) or cmpAbs(nextSeed,'1000000000')>0 then
+    return redis.error_reply('CORDOVA_INVALID_VERIFICATION_BUDGET_TOTAL')
+  end
+  local expectedVerificationPostings=nil
+  local expectedVerificationPostingCount=0
+  local function expectVerificationPosting(bucket,account,delta)
+    expectedVerificationPostings[bucket..':'..account]=delta
+    expectedVerificationPostingCount=expectedVerificationPostingCount+1
+  end
+  if recordObject.kind=='verification_seed' then
+    expectedVerificationPostings={}
+    expectVerificationPosting('cash.hot','',seedDelta)
+    expectVerificationPosting('equity','',negativeUnsigned(seedDelta))
+  elseif recordObject.kind=='verification_reserve' then
+    expectedVerificationPostings={}
+    expectVerificationPosting('platform.verification_reserved','',verifyReservedDelta)
+    expectVerificationPosting('equity','',negativeUnsigned(verifyReservedDelta))
+  elseif recordObject.kind=='verification_spend' then
+    expectedVerificationPostings={}
+    local ownerAccount=nil
+    for field,_ in pairs(actualPostings) do
+      local candidate=string.match(field,'^owner%.pending:(.+)$')
+      if candidate then
+        if ownerAccount then return redis.error_reply('CORDOVA_VERIFICATION_POSTING_MISMATCH') end
+        ownerAccount=candidate
+      end
+    end
+    if not validUUID(ownerAccount) then return redis.error_reply('CORDOVA_VERIFICATION_POSTING_MISMATCH') end
+    local equityRelease=string.sub(verifyReservedDelta,2)
+    expectVerificationPosting('platform.verification_reserved','',verifyReservedDelta)
+    expectVerificationPosting('owner.pending',ownerAccount,negativeUnsigned(verifySpentDelta))
+    expectVerificationPosting('equity','',equityRelease)
+    expectVerificationPosting('verification_expense','',verifySpentDelta)
+  elseif recordObject.kind=='verification_release' then
+    expectedVerificationPostings={}
+    expectVerificationPosting('platform.verification_reserved','',verifyReservedDelta)
+    expectVerificationPosting('equity','',string.sub(verifyReservedDelta,2))
+  end
+  if expectedVerificationPostings then
+    local actualVerificationPostingCount=0
+    for field,delta in pairs(actualPostings) do
+      actualVerificationPostingCount=actualVerificationPostingCount+1
+      if expectedVerificationPostings[field]~=delta then return redis.error_reply('CORDOVA_VERIFICATION_POSTING_MISMATCH') end
+    end
+    if actualVerificationPostingCount~=expectedVerificationPostingCount then
+      return redis.error_reply('CORDOVA_VERIFICATION_POSTING_COUNT_MISMATCH')
+    end
+  end
+  if recordObject.kind=='verification_reserve' then
+    local limit='0'
+    if nextGross~='0' then limit=divSmall(nextGross,20) else limit=nextSeed end
+    local used=addSigned(nextVerifySpent,nextVerifyReserved)
+    if not validUnsigned(used) or cmpAbs(used,limit)>0 then return {-6,'verification budget exceeded'} end
+  end
+  verificationFields={['gross:'..day]=nextGross,['seed:'..day]=nextSeed,
+    ['spent:'..day]=nextVerifySpent,['reserved:'..day]=nextVerifyReserved}
+  if verificationReferenceID then
+    local priorReference=redis.call('HGET',KEYS[10],verificationReferenceID)
+    if recordObject.kind=='verification_reserve' then
+      if priorReference then return {-7,'verification reservation changed'} end
+      local nextReference=addSigned('0',verifyReservedDelta)
+      if not validUnsigned(nextReference) or nextReference=='0' then return {-7,'verification reservation changed'} end
+      verificationReferenceValue=nextReference..'|'..day
+    else
+      if not priorReference then return {-7,'verification reservation changed'} end
+      local priorAmount,priorDay=string.match(priorReference,'^([0-9]+)|(%d%d%d%d%-%d%d%-%d%d)$')
+      local released=string.sub(verifyReservedDelta,2)
+      if not validUnsigned(priorAmount or '') or priorDay~=day or priorAmount~=released then
+        return {-7,'verification reservation changed'}
+      end
+      verificationReferenceValue='0'
+    end
+  end
+end
+if verificationGrossExpected and verificationGrossExpected~='0' and verificationChange==nil then
+  return redis.error_reply('CORDOVA_MISSING_VERIFICATION_REVENUE')
+end
+if verificationChange==nil and string.sub(recordObject.kind,1,13)=='verification_' then
+  return redis.error_reply('CORDOVA_MISSING_VERIFICATION_BUDGET_CHANGE')
+end
+
 for field,value in pairs(updates) do redis.call('HSET',KEYS[2],field,value) end
 redis.call('XADD',KEYS[4],'*','entry',record)
 redis.call('HSET',KEYS[3],'fp:'..operation,fingerprint,'entry:'..operation,record)
@@ -1381,6 +1668,13 @@ if hasRequest=='1' then
   redis.call('HSET',KEYS[7],'limit:'..capKey,effectiveLimit,'spent:'..capKey,nextSpent,'reserved:'..capKey,nextReserved)
   if terminalRequest then
     redis.call('SADD',KEYS[8],requestID)
+  end
+end
+if verificationFields then
+  for field,value in pairs(verificationFields) do redis.call('HSET',KEYS[9],field,value) end
+  if verificationReferenceID then
+    if verificationReferenceValue=='0' then redis.call('HDEL',KEYS[10],verificationReferenceID)
+    else redis.call('HSET',KEYS[10],verificationReferenceID,verificationReferenceValue) end
   end
 end
 return {1,record}
