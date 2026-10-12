@@ -121,6 +121,7 @@ func TestRedisJournalIntegrationRetryRecoveryAndPrecision(t *testing.T) {
 	secondJournal.stream, secondJournal.outbox, secondJournal.headKey = journal.stream, journal.outbox, journal.headKey
 	secondJournal.balancesKey, secondJournal.operationsKey = journal.balancesKey, journal.operationsKey
 	secondJournal.requestsKey, secondJournal.capsKey, secondJournal.barrierKey = journal.requestsKey, journal.capsKey, journal.barrierKey
+	secondJournal.verificationKey, secondJournal.verificationReservationsKey = journal.verificationKey, journal.verificationReservationsKey
 	secondJournal.usagePendingKey = journal.usagePendingKey
 	secondLedger, err := NewRedisLedger(secondJournal)
 	if err != nil {
@@ -224,6 +225,134 @@ func TestRedisLedgerZeroPricedTransitionsUseCanonicalZero(t *testing.T) {
 	balance, err := ledger.Balance(ctx, account)
 	if err != nil || balance.Available.Int64() != 0 || balance.Reserved.Int64() != 0 {
 		t.Fatalf("zero-priced balance=%+v err=%v", balance, err)
+	}
+}
+
+func TestRedisJournalIntegrationVerificationBudgetReservationsAndReplay(t *testing.T) {
+	client := integrationRedisClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	journal := integrationJournal(t, client)
+	ledger, err := NewRedisLedger(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dayA := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	dayB := dayA.AddDate(0, 0, 1)
+	if recovered, err := ledger.Recover(ctx, dayA); err != nil || recovered != 0 {
+		t.Fatalf("initial recovery count=%d err=%v", recovered, err)
+	}
+	seed, _ := domain.NewPiconero(1_000)
+	fundingA, fundingB := testID(t), testID(t)
+	if _, err := ledger.FundOperatorVerificationSeed(ctx, fundingA, seed, dayA); err != nil {
+		t.Fatal(err)
+	}
+	seedAgain, err := ledger.FundOperatorVerificationSeed(ctx, fundingA, seed, dayA.Add(time.Hour))
+	if err != nil || seedAgain.VerificationBudget.Day != dayA.Format("2006-01-02") {
+		t.Fatalf("funding retry changed the seed entry: entry=%+v err=%v", seedAgain, err)
+	}
+	if _, err := ledger.FundOperatorVerificationSeed(ctx, fundingB, seed, dayB); err != nil {
+		t.Fatal(err)
+	}
+	budget, err := ledger.VerificationBudget(ctx, dayA)
+	if err != nil || budget.Source != VerificationBudgetOperator || budget.Remaining.Int64() != seed.Int64() {
+		t.Fatalf("seed budget=%+v err=%v", budget, err)
+	}
+
+	reserveAmount, _ := domain.NewPiconero(700)
+	references := []string{testID(t), testID(t)}
+	type reserveResult struct {
+		referenceID string
+		err         error
+	}
+	results := make(chan reserveResult, len(references))
+	var workers sync.WaitGroup
+	for _, referenceID := range references {
+		workers.Add(1)
+		go func(referenceID string) {
+			defer workers.Done()
+			_, reserveErr := ledger.ReserveVerificationBudget(ctx, referenceID, reserveAmount, dayA)
+			results <- reserveResult{referenceID: referenceID, err: reserveErr}
+		}(referenceID)
+	}
+	workers.Wait()
+	close(results)
+	var activeReference string
+	var succeeded, rejected int
+	for result := range results {
+		switch {
+		case result.err == nil:
+			succeeded++
+			activeReference = result.referenceID
+		case errors.Is(result.err, ErrVerificationBudgetExceeded):
+			rejected++
+		default:
+			t.Fatalf("concurrent budget reserve %s failed unexpectedly: %v", result.referenceID, result.err)
+		}
+	}
+	if succeeded != 1 || rejected != 1 {
+		t.Fatalf("concurrent reservation outcomes succeeded=%d cap_rejected=%d", succeeded, rejected)
+	}
+
+	dayBReference := testID(t)
+	if _, err := ledger.ReserveVerificationBudget(ctx, dayBReference, reserveAmount, dayB); err != nil {
+		t.Fatalf("second UTC day should have a fresh seed budget: %v", err)
+	}
+	ownerID := testID(t)
+	spendAmount, _ := domain.NewPiconero(250)
+	forgedDayEntry := Entry{OperationID: "verification-spend:" + activeReference, Kind: "verification_spend",
+		ReferenceID: activeReference, CreatedAt: dayB, Postings: []Posting{
+			posting(BucketVerificationReserved, "", -reserveAmount.Int64()), posting(BucketOwnerPending, ownerID, -spendAmount.Int64()),
+			posting(BucketEquity, "", reserveAmount.Int64()), posting(BucketVerificationExpense, "", spendAmount.Int64()),
+		}, VerificationBudget: &VerificationBudgetChange{Day: dayB.Format("2006-01-02"), GrossRevenueDelta: "0",
+			OperatorSeedDelta: "0", SpentDelta: spendAmount.String(), ReservedDelta: negativeAmount(reserveAmount)}}
+	if _, err := journal.Append(ctx, forgedDayEntry); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reservation moved between UTC days: %v", err)
+	}
+	if _, err := ledger.SettleVerificationBudget(ctx, activeReference, ownerID, spendAmount, dayB); err != nil {
+		t.Fatal(err)
+	}
+	budget, err = ledger.VerificationBudget(ctx, dayA)
+	if err != nil || budget.Remaining.Int64() != 750 {
+		t.Fatalf("settled seed budget=%+v err=%v", budget, err)
+	}
+	if _, err := ledger.ReleaseVerificationBudget(ctx, dayBReference, dayB.AddDate(0, 0, 1)); err != nil {
+		t.Fatalf("release from a later UTC day failed: %v", err)
+	}
+	budget, err = ledger.VerificationBudget(ctx, dayB)
+	if err != nil || budget.Remaining.Int64() != seed.Int64() {
+		t.Fatalf("released next-day budget=%+v err=%v", budget, err)
+	}
+
+	accountID, apiKeyID, inferenceOwnerID, requestID, attemptID := testID(t), testID(t), testID(t), testID(t), testID(t)
+	credit, _ := domain.NewPiconero(20_000)
+	if _, err := ledger.CreditTest(ctx, accountID, "verification-budget-credit", credit, dayA.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	requestCap, _ := domain.NewPiconero(20_000)
+	price := testPrice(t, 10_000_000_000, 1, 5_000)
+	params := ReserveParams{RequestID: requestID, AttemptID: attemptID, ModelID: defaultModelID, AccountID: accountID,
+		APIKeyID: apiKeyID, OwnerID: inferenceOwnerID, InputTokens: 1, MaxOutputTokens: 1, DailySpendCap: requestCap,
+		Price: price, AcceptedAt: dayA}
+	if _, _, err := ledger.Reserve(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Settle(ctx, requestID, attemptID, 0, false, dayA.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	budget, err = ledger.VerificationBudget(ctx, dayA)
+	if err != nil || budget.Source != VerificationBudgetRevenue || budget.Limit.Int64() != 500 || budget.Remaining.Int64() != 250 {
+		t.Fatalf("revenue-backed budget=%+v err=%v", budget, err)
+	}
+	if err := journal.Verify(ctx); err != nil {
+		t.Fatalf("journal verification failed: %v", err)
+	}
+
+	restarted := restartIntegrationLedger(t, ctx, client, journal, dayA.Add(time.Hour))
+	replayed, err := restarted.VerificationBudget(ctx, dayA)
+	if err != nil || replayed.Source != budget.Source || replayed.Limit.Int64() != budget.Limit.Int64() || replayed.Remaining.Int64() != budget.Remaining.Int64() {
+		t.Fatalf("replayed budget=%+v before restart=%+v err=%v", replayed, budget, err)
 	}
 }
 
@@ -490,6 +619,7 @@ func TestRedisJournalIntegrationRedisProcessRestartAfterAppend(t *testing.T) {
 	newJournal.stream, newJournal.outbox, newJournal.headKey = journal.stream, journal.outbox, journal.headKey
 	newJournal.balancesKey, newJournal.operationsKey, newJournal.requestsKey = journal.balancesKey, journal.operationsKey, journal.requestsKey
 	newJournal.capsKey, newJournal.barrierKey, newJournal.usagePendingKey = journal.capsKey, journal.barrierKey, journal.usagePendingKey
+	newJournal.verificationKey, newJournal.verificationReservationsKey = journal.verificationKey, journal.verificationReservationsKey
 	newLedger, err := NewRedisLedger(newJournal)
 	if err != nil {
 		t.Fatal(err)
@@ -613,6 +743,7 @@ func restartIntegrationLedger(t *testing.T, ctx context.Context, client *redis.C
 	journal.stream, journal.outbox, journal.headKey = previous.stream, previous.outbox, previous.headKey
 	journal.balancesKey, journal.operationsKey, journal.requestsKey = previous.balancesKey, previous.operationsKey, previous.requestsKey
 	journal.capsKey, journal.barrierKey, journal.usagePendingKey = previous.capsKey, previous.barrierKey, previous.usagePendingKey
+	journal.verificationKey, journal.verificationReservationsKey = previous.verificationKey, previous.verificationReservationsKey
 	ledger, err := NewRedisLedger(journal)
 	if err != nil {
 		t.Fatal(err)
@@ -669,13 +800,16 @@ func integrationJournal(t *testing.T, client *redis.Client) *RedisJournal {
 	journal.operationsKey = prefix + ":operations"
 	journal.requestsKey = prefix + ":requests"
 	journal.capsKey = prefix + ":caps"
+	journal.verificationKey = prefix + ":verification"
+	journal.verificationReservationsKey = prefix + ":verification-reservations"
 	journal.barrierKey = prefix + ":barrier"
 	journal.usagePendingKey = prefix + ":usage-pending"
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = client.Del(ctx, journal.stream, journal.outbox, journal.headKey, journal.balancesKey,
-			journal.operationsKey, journal.requestsKey, journal.capsKey, journal.barrierKey, journal.usagePendingKey).Err()
+			journal.operationsKey, journal.requestsKey, journal.capsKey, journal.verificationKey,
+			journal.verificationReservationsKey, journal.barrierKey, journal.usagePendingKey).Err()
 	})
 	return journal
 }

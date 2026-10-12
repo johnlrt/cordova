@@ -143,12 +143,20 @@ func TestRedisScriptUsesStringMoneyArithmetic(t *testing.T) {
 	}
 	firstMutation := strings.Index(appendLedgerScript, "redis.call('HSET'")
 	capValidation := strings.Index(appendLedgerScript, "return {-4,'spend cap exceeded'}")
-	if firstMutation < 0 || capValidation < 0 || firstMutation < capValidation {
+	verificationCapValidation := strings.Index(appendLedgerScript, "return {-6,'verification budget exceeded'}")
+	if firstMutation < 0 || capValidation < 0 || verificationCapValidation < 0 ||
+		firstMutation < capValidation || firstMutation < verificationCapValidation {
 		t.Fatal("request and cap validation must complete before the script's first write")
 	}
 	for _, required := range []string{"KEYS[6],requestField,requestJSON", "KEYS[7],'limit:'..capKey"} {
 		if !strings.Contains(appendLedgerScript, required) {
 			t.Fatalf("Redis script is missing atomic request/cap write %q", required)
+		}
+	}
+	for _, required := range []string{"KEYS[9]", "KEYS[10]", "CORDOVA_VERIFICATION_POSTING_MISMATCH",
+		"CORDOVA_MISSING_VERIFICATION_REVENUE", "priorDay~=day", "verification_expense"} {
+		if !strings.Contains(appendLedgerScript, required) {
+			t.Fatalf("Redis script is missing A19 journal invariant %q", required)
 		}
 	}
 	if _, err := domain.ParsePiconero("9007199254740993"); err != nil {

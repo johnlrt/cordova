@@ -156,6 +156,8 @@ C4 теперь пропускает подписанные `nodes` invalidation
 | Проверка | Результат | Ограничение |
 | --- | --- | --- |
 | `go build ./...` | Прошла локально на закреплённом Go 1.27.2 Windows/amd64 | Компиляция не исполняет Go tests или Redis Lua. |
-| Redis budget integration / restart replay | Не запускалась в этой сессии | Проверить атомарный отказ при исчерпании лимита, конкурентные резервы, spend/release, повтор операций и Verify/Recover на Redis с AOF. |
+| `go test ./...` | Прошла с разрешёнными loopback-сокетами; включает новые unit checks для gross-проводок, expense и дневного replay | Без Redis переменная `CORDOVA_TEST_REDIS_URL` отсутствует, поэтому интеграционные тесты были пропущены. |
+| `go vet ./...` | Прошла локально на закреплённом Go 1.27.2 Windows/amd64 | Не исполняет Redis Lua. |
+| Redis budget integration / restart replay | Не запускалась в этой сессии; локальных `redis-server`, `redis-cli` и Docker нет в `PATH` | Hosted CI должен проверить атомарный отказ при исчерпании лимита, конкурентные резервы, spend/release, повтор операций и Verify/Recover на Redis с AOF. |
 
 В journal добавлены точные суточные счётчики, атомарный cap-check, привязка резерва к UTC-дню, сверка gross revenue с сохранённым terminal request и отдельная `verification_expense` проводка. Вызов записи seed пока требует реального источника подтверждённого operator transfer; canary scheduling, A11 sampling и fraud hold/release остаются открытыми.
