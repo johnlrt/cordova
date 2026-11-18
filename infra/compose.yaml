@@ -91,7 +91,7 @@ services:
         password="$$(cat /run/secrets/redis_password)"
         find /data ! -user redis -exec chown redis:redis '{}' +
         umask 077
-        printf 'appendonly yes\nappendfsync everysec\nrequirepass %s\n' "$$password" > /tmp/redis.conf
+        printf 'appendonly yes\nappendfsync everysec\nmaxmemory-policy noeviction\nstop-writes-on-bgsave-error yes\nsave 900 1\nsave 300 100\nsave 60 10000\nrequirepass %s\n' "$$password" > /tmp/redis.conf
         chown redis:redis /tmp/redis.conf
         exec gosu redis redis-server /tmp/redis.conf
     secrets: [redis_password]
@@ -132,7 +132,7 @@ services:
       - --advertise-kafka-addr
       - internal://redpanda:9092
       - --set
-      - redpanda.auto_create_topics_enabled=true
+      - redpanda.auto_create_topics_enabled=false
     volumes: [redpanda-data:/var/lib/redpanda/data]
     networks: [private]
     cap_drop: [ALL]

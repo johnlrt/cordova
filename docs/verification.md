@@ -61,3 +61,16 @@ GOCACHE=/private/tmp/cordova-go-build go test -race -count=1 ./...
 - `make test-ledger-redis` прошла на временной Redis-сборке; Kafka replay, tokenizer parity, SOCKS5h и wallet stagenet проверки не подтверждены.
 - `CORDOVA_TEST_REDIS_SERVER=/private/tmp/redis-8.10.2/src/redis-server make test-ledger-redis-process` прошла под `-race`: тест завершил собственный Redis после Lua append до `WAITAOF`, перезапустил его на том же AOF-каталоге, затем подтвердил orphan refund, нулевой reserved balance и journal replay. Это не проверяет убийство процесса посреди Redis-команды или replica fsync.
 - Docker daemon недоступен из-за отсутствующего `/Users/abbas/.docker/run/docker.sock`; изолированный стек не запускался.
+
+## Снимок проверки M1 backend — 2026-11-18 (Linux amd64, `go1.27.3`)
+
+Среда: изолированная Linux VM без Docker, Redis, Kafka и доступа к `proxy.golang.org` для части модулей. Код не менялся.
+
+| Проверка | Результат | Ограничение |
+| --- | --- | --- |
+| `make contracts-check` | Прошла: 25 REST paths, 27 node WS types, 8 live WS types, 61 fixtures | — |
+| `go test -race -count=1 ./...` | Прошли `internal/api`, `billing`, `domain`, `mocknode`, `request` | Проектный `go 1.27.2` не использовался; установлен 1.27.3. |
+| `cmd/gateway`, `internal/m1` | **Не собраны**: прокси вернул 403 для `github.com/klauspost/compress@v1.18.7` и `github.com/pierrec/lz4/v4@v4.1.26` (зависимости franz-go) | Тесты gateway и M1 (аккаунты, ключи, C3, live, usage) в этом снимке не выполнялись. |
+| Redis integration, `make smoke`, `make network-check`, `make test-edge` | Не запускались | Нет Redis/Docker/Kafka. |
+
+Вывод: M1 в этом снимке не подтверждён целиком. Нужна среда с доступом к модулям Go и работающим Docker, чтобы выполнить `go test -race ./...`, `make up`, `make smoke`, `make network-check`, `make test-edge`.

@@ -42,6 +42,13 @@ def main() -> int:
         gateway_topic_dependency = services["gateway"].get("depends_on", {}).get("usage-topic-init", {})
         if topic_dependency.get("condition") != "service_healthy" or gateway_topic_dependency.get("condition") != "service_completed_successfully":
             fail("the gateway must wait for successful usage topic provisioning")
+        redis_script = "\n".join(str(part) for part in services["redis"].get("command", []))
+        for setting in ["appendonly yes", "maxmemory-policy noeviction", "stop-writes-on-bgsave-error yes", "save 900 1", "save 300 100", "save 60 10000"]:
+            if setting not in redis_script.replace("\\n", " ").replace("\n", " "):
+                fail(f"the Redis ledger store must set: {setting}")
+        redpanda_command = [str(part) for part in services["redpanda"].get("command", [])]
+        if "redpanda.auto_create_topics_enabled=false" not in redpanda_command:
+            fail("Redpanda topic auto-creation must stay disabled; topics are provisioned explicitly")
         gateway_environment = services["gateway"].get("environment", {})
         if gateway_environment.get("CORDOVA_PRIVACY_NOTICE_VERSION") != "privacy-v1":
             fail("the gateway must use the current privacy notice version")
